@@ -314,16 +314,25 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
                             return { success: false, message: 'forge-select not found in shadow root', totalRows: null };
                         }
                         
-                        // Set the pageSize property directly on the paginator (this is the key!)
-                        // Based on the debug output, forge-paginator has a pageSize property
+                        fs.value = '100';
                         fp.pageSize = 100;
                         
-                        // Also set the value on the select element to keep UI in sync
-                        fs.value = '100';
+                        // Dispatch change event on select to trigger update
+                        const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+                        fs.dispatchEvent(changeEvent);
                         
-                        // Set attributes as well (might trigger attributeChangedCallback)
-                        fp.setAttribute('page-size', '100');
-                        fp.setAttribute('pagesize', '100');
+                        // Dispatch forge-paginator-change event with proper detail (same as manual change)
+                        const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
+                            bubbles: true,
+                            cancelable: true,
+                            detail: {
+                                type: 'page-size',
+                                pageSize: 100,
+                                pageIndex: fp.pageIndex || 0,
+                                offset: fp.offset || 0
+                            }
+                        });
+                        fp.dispatchEvent(paginatorChangeEvent);
                         
                         // Return success - we'll read the total rows after waiting for the page to update
                         return { success: true, message: 'Set to 100', totalRows: null };
@@ -337,13 +346,8 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
                 rows_result = page.evaluate(set_rows_js)
                 
                 if rows_result and rows_result.get('success'):
-                    # Wait for network activity to complete (the component likely fetches new data)
-                    try:
-                        # Wait for network to be idle, with a timeout
-                        page.wait_for_load_state('networkidle', timeout=10000)
-                    except Exception:
-                        # If networkidle times out, just wait a fixed amount
-                        page.wait_for_timeout(5000)
+                    # Wait for the component to update (no network traffic, just DOM updates)
+                    page.wait_for_timeout(2000)
                     
                     # Now read the total rows count after the page has updated
                     read_total_js = """
