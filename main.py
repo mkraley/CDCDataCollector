@@ -192,23 +192,25 @@ def access_url(url, timeout=30):
         return False, f"Unexpected Error: {str(e)}", None, None
 
 
-def url_to_pdf(url, output_path, timeout=120000):
+def url_to_pdf(url, output_path, timeout=120000, debug=False):
     """
     Convert a URL to PDF using Playwright (headless browser)
     Expands "Read more" links before generating PDF to capture full content
+    Changes "Rows per page" dropdown to 100 if available
     
     Args:
         url: URL to convert to PDF
         output_path: Path object where PDF should be saved
         timeout: Timeout in milliseconds (default: 120 seconds)
+        debug: If True, run browser in non-headless mode and add debug logging
     
     Returns:
-        True if successful, False otherwise
+        Tuple of (success: bool, status_message: str, total_rows: int or None)
     """
     try:
         with sync_playwright() as p:
-            # Launch browser
-            browser = p.chromium.launch(headless=True)
+            # Launch browser (non-headless in debug mode)
+            browser = p.chromium.launch(headless=not debug, slow_mo=500 if debug else 0)
             page = browser.new_page()
             
             # Navigate to URL - use 'domcontentloaded' which is more lenient than 'networkidle'
@@ -289,18 +291,129 @@ def url_to_pdf(url, output_path, timeout=120000):
                 print(f"  Note: Could not expand 'Read more' links: {e}")
                 clicked_count = 0
             
+            # Try to change "Rows per page" dropdown to 100 to show more data
+            total_rows = None
+            rows_status_msg = None
+            try:
+                # Wait a bit for page to be fully loaded
+                page.wait_for_timeout(2000)
+                
+                # Set the rows per page value and trigger update
+                set_rows_js = """
+                () => {
+                    try {
+                        // Find forge-paginator
+                        const fp = document.querySelector('forge-paginator');
+                        if (!fp) {
+                            return { success: false, message: 'forge-paginator not found', totalRows: null };
+                        }
+                        
+                        // Find the select element in shadow root
+                        const fs = fp.shadowRoot.querySelector('forge-select');
+                        if (!fs) {
+                            return { success: false, message: 'forge-select not found in shadow root', totalRows: null };
+                        }
+                        
+                        // Set the pageSize property directly on the paginator (this is the key!)
+                        // Based on the debug output, forge-paginator has a pageSize property
+                        fp.pageSize = 100;
+                        
+                        // Also set the value on the select element to keep UI in sync
+                        fs.value = '100';
+                        
+                        // Set attributes as well (might trigger attributeChangedCallback)
+                        fp.setAttribute('page-size', '100');
+                        fp.setAttribute('pagesize', '100');
+                        
+                        // Return success - we'll read the total rows after waiting for the page to update
+                        return { success: true, message: 'Set to 100', totalRows: null };
+                    } catch (e) {
+                        return { success: false, message: 'Error: ' + e.message, totalRows: null };
+                    }
+                }
+                """
+                
+                # Set the value directly
+                rows_result = page.evaluate(set_rows_js)
+                
+                if rows_result and rows_result.get('success'):
+                    # Wait for network activity to complete (the component likely fetches new data)
+                    try:
+                        # Wait for network to be idle, with a timeout
+                        page.wait_for_load_state('networkidle', timeout=10000)
+                    except Exception:
+                        # If networkidle times out, just wait a fixed amount
+                        page.wait_for_timeout(5000)
+                    
+                    # Now read the total rows count after the page has updated
+                    read_total_js = """
+                    () => {
+                        try {
+                            const fp = document.querySelector('forge-paginator');
+                            if (!fp || !fp.shadowRoot) return null;
+                            
+                            const rangeLabel = fp.shadowRoot.querySelector('.range-label');
+                            if (!rangeLabel) return null;
+                            
+                            let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
+                            // Check for slot content
+                            const slot = rangeLabel.querySelector('slot[name="range-label"]');
+                            if (slot && slot.assignedNodes) {
+                                const assigned = slot.assignedNodes();
+                                if (assigned.length > 0) {
+                                    rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
+                                }
+                            }
+                            
+                            // Extract total number after "of"
+                            const match = rangeText.match(/of\\s+(\\d+)/i);
+                            return match ? parseInt(match[1]) : null;
+                        } catch (e) {
+                            return null;
+                        }
+                    }
+                    """
+                    
+                    total_rows = page.evaluate(read_total_js)
+                    
+                    if total_rows is not None:
+                        print(f"  Set rows per page to 100. Total rows: {total_rows}")
+                        if total_rows > 100:
+                            rows_status_msg = f"Set to 100 (Note: {total_rows} total rows > 100)"
+                            print(f"  WARNING: {total_rows} total rows exceeds 100, not all rows may be visible")
+                        else:
+                            rows_status_msg = "Set to 100"
+                    else:
+                        rows_status_msg = "Set to 100 (count unknown)"
+                else:
+                    rows_status_msg = rows_result.get('message', 'Could not change rows per page') if rows_result else 'Dropdown not found'
+                    print(f"  Note: {rows_status_msg}")
+                    total_rows = None
+            except Exception as e:
+                rows_status_msg = f"Error changing rows per page: {str(e)[:50]}"
+                print(f"  Note: Could not change rows per page dropdown: {e}")
+            
             # Generate PDF
             page.pdf(path=str(output_path), format='A4', print_background=True)
             
             # Close browser
             browser.close()
-        return True
+        
+        # Build status message
+        status_parts = []
+        if rows_status_msg and 'Set to 100' in rows_status_msg:
+            status_parts.append(rows_status_msg)
+        
+        status_message = "; ".join(status_parts) if status_parts else "PDF generated"
+        
+        return True, status_message, total_rows
     except Exception as e:
-        print(f"  ERROR: Could not convert URL to PDF: {e}")
-        return False
+        error_msg = f"ERROR: Could not convert URL to PDF: {e}"
+        print(f"  {error_msg}")
+        return False, error_msg, None
 
 
-def process_rows(source_file, output_file, start_row=0, num_rows=None):
+def process_rows(source_file, output_file, start_row=0, num_rows=None, debug=False):
     """
     Process rows from source sheet and write to output sheet
     
@@ -405,7 +518,7 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None):
         if url and url.startswith('http'):
             print(f"  Attempting to access URL...")
             success, status_msg, status_code, html_content = access_url(url)
-            new_row['Status'] = status_msg
+            base_status = status_msg
             if success:
                 print(f"  ✓ Status: {status_msg}")
                 
@@ -415,14 +528,23 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None):
                     pdf_path = folder_path / pdf_filename
                     
                     print(f"  Converting URL to PDF using browser...")
-                    if url_to_pdf(url, pdf_path):
+                    pdf_success, pdf_status, total_rows = url_to_pdf(url, pdf_path, debug=debug)
+                    if pdf_success:
                         print(f"  ✓ PDF saved: {pdf_path}")
+                        # Combine status messages
+                        status_parts = [base_status]
+                        if pdf_status:
+                            status_parts.append(pdf_status)
+                        new_row['Status'] = "; ".join(status_parts)
                     else:
                         print(f"  ✗ Failed to save PDF")
+                        new_row['Status'] = f"{base_status}; {pdf_status}"
                 else:
                     print(f"  ✗ No folder available for PDF")
+                    new_row['Status'] = base_status
             else:
                 print(f"  ✗ Status: {status_msg}")
+                new_row['Status'] = status_msg
         else:
             new_row['Status'] = "Invalid URL"
             print(f"  ✗ Status: Invalid URL")
@@ -472,10 +594,15 @@ def main():
         default=None,
         help='Number of eligible rows to process (default: all remaining)'
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode: run browser in visible mode and add debug logging'
+    )
     
     args = parser.parse_args()
     
-    process_rows(args.input, args.output, args.start_row, args.num_rows)
+    process_rows(args.input, args.output, args.start_row, args.num_rows, debug=args.debug)
 
 
 if __name__ == "__main__":
