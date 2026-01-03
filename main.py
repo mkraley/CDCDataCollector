@@ -192,7 +192,7 @@ def access_url(url, timeout=30):
         return False, f"Unexpected Error: {str(e)}", None, None
 
 
-def url_to_pdf(url, output_path, timeout=120000, debug=False):
+def url_to_pdf(url, output_path, timeout=120000):
     """
     Convert a URL to PDF using Playwright (headless browser)
     Expands "Read more" links before generating PDF to capture full content
@@ -202,126 +202,104 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
         url: URL to convert to PDF
         output_path: Path object where PDF should be saved
         timeout: Timeout in milliseconds (default: 120 seconds)
-        debug: If True, run browser in non-headless mode and add debug logging
     
     Returns:
         Tuple of (success: bool, status_message: str, total_rows: int or None)
     """
     try:
         with sync_playwright() as p:
-            # Launch browser (non-headless in debug mode)
-            browser = p.chromium.launch(headless=not debug, slow_mo=500 if debug else 0)
+            browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             
-            # Navigate to URL - use 'domcontentloaded' which is more lenient than 'networkidle'
-            # 'networkidle' waits for no network activity, which can timeout on dynamic pages
             page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            
-            # Wait a bit more for any dynamic content to load
-            page.wait_for_timeout(2000)  # Wait 2 seconds for additional content
+            page.wait_for_timeout(2000)
             
             # Find and click "Read more" links/buttons to expand content
-            # Use JavaScript to find elements with case-insensitive text matching
             expand_keywords = ['read more', 'show more', 'expand', 'see more', 'view more', 
                              'read full', 'show full', 'view full', 'continue reading']
             
-            # Use JavaScript to find and click expand links (case-insensitive)
-            js_code = f"""
-            (keywords) => {{
+            expand_js = """
+            (keywords) => {
                 const clicked = new Set();
                 let count = 0;
                 const maxClicks = 50;
                 
-                function findAndClick(keyword) {{
-                    // Find all possible clickable elements
+                function findAndClick(keyword) {
                     const allElements = document.querySelectorAll('a, button, [role="button"], span, div');
                     
-                    for (const el of allElements) {{
+                    for (const el of allElements) {
                         if (count >= maxClicks) break;
                         
                         const text = (el.textContent || el.innerText || '').trim();
                         const textLower = text.toLowerCase();
                         
-                        // Check if element text contains the keyword (case-insensitive)
-                        if (textLower.includes(keyword.toLowerCase()) && text.length < 100 && text.length > 0) {{
-                            // Create a unique ID for this element
+                        if (textLower.includes(keyword.toLowerCase()) && text.length < 100 && text.length > 0) {
                             const elId = el.tagName + '|' + (el.className || '') + '|' + text.substring(0, 50);
                             
-                            if (!clicked.has(elId)) {{
-                                // Check if element is visible
+                            if (!clicked.has(elId)) {
                                 const rect = el.getBoundingClientRect();
                                 const style = window.getComputedStyle(el);
                                 
                                 if (rect.width > 0 && rect.height > 0 && 
                                     style.display !== 'none' && style.visibility !== 'hidden' &&
-                                    parseFloat(style.opacity) > 0) {{
+                                    parseFloat(style.opacity) > 0) {
                                     
-                                    try {{
-                                        el.scrollIntoView({{ behavior: 'auto', block: 'center' }});
+                                    try {
+                                        el.scrollIntoView({ behavior: 'auto', block: 'center' });
                                         el.click();
                                         clicked.add(elId);
                                         count++;
-                                    }} catch (e) {{
+                                    } catch (e) {
                                         // Element might not be clickable, skip
-                                    }}
-                                }}
-                            }}
-                        }}
-                    }}
-                }}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 
-                // Try each keyword
-                for (const keyword of keywords) {{
+                for (const keyword of keywords) {
                     if (count >= maxClicks) break;
                     findAndClick(keyword);
-                }}
+                }
                 
                 return count;
-            }}
+            }
             """
             
             try:
-                clicked_count = page.evaluate(js_code, expand_keywords)
+                clicked_count = page.evaluate(expand_js, expand_keywords)
                 if clicked_count > 0:
                     print(f"  Expanded {clicked_count} 'Read more' sections")
-                    # Wait for content to expand after clicking
                     page.wait_for_timeout(1500)
             except Exception as e:
-                # If JavaScript execution fails, continue without expansion
                 print(f"  Note: Could not expand 'Read more' links: {e}")
-                clicked_count = 0
             
-            # Try to change "Rows per page" dropdown to 100 to show more data
+            # Change "Rows per page" to 100 to show more data
             total_rows = None
             rows_status_msg = None
             try:
-                # Wait a bit for page to be fully loaded
                 page.wait_for_timeout(2000)
                 
-                # Set the rows per page value and trigger update
                 set_rows_js = """
                 () => {
                     try {
-                        // Find forge-paginator
                         const fp = document.querySelector('forge-paginator');
                         if (!fp) {
                             return { success: false, message: 'forge-paginator not found', totalRows: null };
                         }
                         
-                        // Find the select element in shadow root
                         const fs = fp.shadowRoot.querySelector('forge-select');
                         if (!fs) {
-                            return { success: false, message: 'forge-select not found in shadow root', totalRows: null };
+                            return { success: false, message: 'forge-select not found', totalRows: null };
                         }
                         
                         fs.value = '100';
                         fp.pageSize = 100;
                         
-                        // Dispatch change event on select to trigger update
                         const changeEvent = new Event('change', { bubbles: true, cancelable: true });
                         fs.dispatchEvent(changeEvent);
                         
-                        // Dispatch forge-paginator-change event with proper detail (same as manual change)
                         const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
                             bubbles: true,
                             cancelable: true,
@@ -334,7 +312,6 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
                         });
                         fp.dispatchEvent(paginatorChangeEvent);
                         
-                        // Return success - we'll read the total rows after waiting for the page to update
                         return { success: true, message: 'Set to 100', totalRows: null };
                     } catch (e) {
                         return { success: false, message: 'Error: ' + e.message, totalRows: null };
@@ -342,14 +319,11 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
                 }
                 """
                 
-                # Set the value directly
                 rows_result = page.evaluate(set_rows_js)
                 
                 if rows_result and rows_result.get('success'):
-                    # Wait for the component to update (no network traffic, just DOM updates)
                     page.wait_for_timeout(2000)
                     
-                    # Now read the total rows count after the page has updated
                     read_total_js = """
                     () => {
                         try {
@@ -360,7 +334,6 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
                             if (!rangeLabel) return null;
                             
                             let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
-                            // Check for slot content
                             const slot = rangeLabel.querySelector('slot[name="range-label"]');
                             if (slot && slot.assignedNodes) {
                                 const assigned = slot.assignedNodes();
@@ -369,7 +342,6 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
                                 }
                             }
                             
-                            // Extract total number after "of"
                             const match = rangeText.match(/of\\s+(\\d+)/i);
                             return match ? parseInt(match[1]) : null;
                         } catch (e) {
@@ -417,7 +389,7 @@ def url_to_pdf(url, output_path, timeout=120000, debug=False):
         return False, error_msg, None
 
 
-def process_rows(source_file, output_file, start_row=0, num_rows=None, debug=False):
+def process_rows(source_file, output_file, start_row=0, num_rows=None):
     """
     Process rows from source sheet and write to output sheet
     
@@ -532,7 +504,7 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, debug=Fal
                     pdf_path = folder_path / pdf_filename
                     
                     print(f"  Converting URL to PDF using browser...")
-                    pdf_success, pdf_status, total_rows = url_to_pdf(url, pdf_path, debug=debug)
+                    pdf_success, pdf_status, total_rows = url_to_pdf(url, pdf_path)
                     if pdf_success:
                         print(f"  ✓ PDF saved: {pdf_path}")
                         # Combine status messages
@@ -598,15 +570,9 @@ def main():
         default=None,
         help='Number of eligible rows to process (default: all remaining)'
     )
-    parser.add_argument(
-        '--debug',
-        action='store_true',
-        help='Enable debug mode: run browser in visible mode and add debug logging'
-    )
-    
     args = parser.parse_args()
     
-    process_rows(args.input, args.output, args.start_row, args.num_rows, debug=args.debug)
+    process_rows(args.input, args.output, args.start_row, args.num_rows)
 
 
 if __name__ == "__main__":
