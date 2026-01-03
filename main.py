@@ -212,7 +212,7 @@ def url_to_pdf(url, output_path, timeout=120000):
             page = browser.new_page()
             
             page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(500)
             
             # Find and click "Read more" links/buttons to expand content
             expand_keywords = ['read more', 'show more', 'expand', 'see more', 'view more', 
@@ -271,7 +271,7 @@ def url_to_pdf(url, output_path, timeout=120000):
                 clicked_count = page.evaluate(expand_js, expand_keywords)
                 if clicked_count > 0:
                     print(f"  Expanded {clicked_count} 'Read more' sections")
-                    page.wait_for_timeout(1500)
+                    # page.wait_for_timeout(1500)
             except Exception as e:
                 print(f"  Note: Could not expand 'Read more' links: {e}")
             
@@ -279,7 +279,7 @@ def url_to_pdf(url, output_path, timeout=120000):
             total_rows = None
             rows_status_msg = None
             try:
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(500)
                 
                 set_rows_js = """
                 () => {
@@ -322,7 +322,7 @@ def url_to_pdf(url, output_path, timeout=120000):
                 rows_result = page.evaluate(set_rows_js)
                 
                 if rows_result and rows_result.get('success'):
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(500)
                     
                     read_total_js = """
                     () => {
@@ -424,12 +424,6 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None):
     title_source_col = find_column(filtered_df, ['Title of Site', 'Title', 'Site Title'])
     office_source_col = find_column(filtered_df, ['Office'])
     agency_source_col = find_column(filtered_df, ['Agency'])
-    
-    print(f"\nSource columns identified:")
-    print(f"  URL: {url_source_col}")
-    print(f"  Title of Site: {title_source_col}")
-    print(f"  Office: {office_source_col}")
-    print(f"  Agency: {agency_source_col}")
     
     # Define output columns
     output_columns = ['7_original_distribution_url', '4_title', '5_agency', '5_agency2', 'Status', 'files_path']
