@@ -14,7 +14,7 @@ import time
 import re
 import os
 import shutil
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 def find_column(df, column_names):
@@ -80,15 +80,16 @@ def get_filtered_rows(source_file):
     return filtered_df, col_g
 
 
-def sanitize_folder_name(name):
+def sanitize_folder_name(name, max_length=100):
     """
     Sanitize a folder name to be valid for Windows filesystem
     
     Args:
-        name: Original folder name
+        name: Original folder/file name
+        max_length: Maximum length for the sanitized name (default: 100)
     
     Returns:
-        Sanitized folder name
+        Sanitized folder/file name
     """
     if not name:
         return "Untitled"
@@ -103,9 +104,10 @@ def sanitize_folder_name(name):
     # Remove control characters
     sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
     
-    # Limit length to reasonable size (Windows path limit is 260 chars, but folder names should be shorter)
-    if len(sanitized) > 200:
-        sanitized = sanitized[:200]
+    # Limit length to avoid Windows path issues
+    # Windows has 260 char path limit, so keep folder names shorter
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
     
     # If empty after sanitization, use default
     if not sanitized:
@@ -136,7 +138,7 @@ def create_title_folder(base_dir, title):
         return None
     
     # Sanitize the title for folder name
-    folder_name = sanitize_folder_name(title)
+    folder_name = sanitize_folder_name(title, max_length=120)
     folder_path = base_path / folder_name
     
     # If folder exists, clear all files in it
@@ -192,7 +194,105 @@ def access_url(url, timeout=30):
         return False, f"Unexpected Error: {str(e)}", None, None
 
 
-def url_to_pdf(url, output_path, timeout=120000):
+def download_dataset(page, output_path, timeout=60000):
+    """
+    Download dataset by clicking Export button and then Download button in the dialog.
+    Intercepts the download request to get the file.
+    
+    Args:
+        page: Playwright page object
+        output_path: Path object where the downloaded file should be saved
+        timeout: Timeout in milliseconds (default: 60 seconds)
+    
+    Returns:
+        Tuple of (success: bool, status_message: str)
+    """
+    try:
+        # Find and click Export button first
+        export_clicked = page.evaluate("""
+            () => {
+                const exportButtons = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(el => {
+                    const text = (el.textContent || el.innerText || '').trim().toLowerCase();
+                    return text.includes('export') && text.length < 50;
+                });
+                
+                if (exportButtons.length === 0) {
+                    return { success: false, message: 'Export button not found' };
+                }
+                
+                try {
+                    exportButtons[0].scrollIntoView({ behavior: 'auto', block: 'center' });
+                    exportButtons[0].click();
+                    return { success: true, message: 'Export button clicked' };
+                } catch (e) {
+                    return { success: false, message: 'Could not click Export button: ' + e.message };
+                }
+            }
+        """)
+        
+        if not export_clicked.get('success'):
+            return False, export_clicked.get('message', 'Could not find Export button')
+        
+        # Wait for dialog to appear
+        page.wait_for_timeout(2000)
+        
+        # Set up download listener before clicking Download
+        with page.expect_download(timeout=timeout) as download_info:
+            # Find and click Download button in the dialog
+            # Try multiple approaches: direct button text, aria-label, etc.
+            download_clicked = page.evaluate("""
+                () => {
+                    // Try to find Download button - check multiple selectors
+                    let downloadButtons = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(el => {
+                        const text = (el.textContent || el.innerText || '').trim().toLowerCase();
+                        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+                        return (text.includes('download') || ariaLabel.includes('download')) && text.length < 100;
+                    });
+                    
+                    // If not found, try looking in dialogs/modals
+                    if (downloadButtons.length === 0) {
+                        const dialogs = document.querySelectorAll('dialog, [role="dialog"], .modal, [class*="dialog"]');
+                        for (const dialog of dialogs) {
+                            const buttons = Array.from(dialog.querySelectorAll('button, a, [role="button"]'));
+                            downloadButtons = buttons.filter(el => {
+                                const text = (el.textContent || el.innerText || '').trim().toLowerCase();
+                                const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+                                return (text.includes('download') || ariaLabel.includes('download')) && text.length < 100;
+                            });
+                            if (downloadButtons.length > 0) break;
+                        }
+                    }
+                    
+                    if (downloadButtons.length === 0) {
+                        return { success: false, message: 'Download button not found in dialog' };
+                    }
+                    
+                    try {
+                        downloadButtons[0].scrollIntoView({ behavior: 'auto', block: 'center' });
+                        downloadButtons[0].click();
+                        return { success: true, message: 'Download button clicked' };
+                    } catch (e) {
+                        return { success: false, message: 'Could not click Download button: ' + e.message };
+                    }
+                }
+            """)
+            
+            if not download_clicked.get('success'):
+                return False, download_clicked.get('message', 'Could not find Download button')
+        
+        # Wait for download to complete and save the file
+        download = download_info.value
+        download.save_as(output_path)
+        
+        return True, f"Dataset downloaded: {output_path.name}"
+    
+    except PlaywrightTimeoutError:
+        return False, "Timeout waiting for download (check if Export/Download buttons work)"
+    except Exception as e:
+        return False, f"Error downloading dataset: {str(e)[:100]}"
+
+
+def url_to_pdf(url, output_path, timeout=120000, headless=True):
     """
     Convert a URL to PDF using Playwright (headless browser)
     Expands "Read more" links before generating PDF to capture full content
@@ -202,13 +302,14 @@ def url_to_pdf(url, output_path, timeout=120000):
         url: URL to convert to PDF
         output_path: Path object where PDF should be saved
         timeout: Timeout in milliseconds (default: 120 seconds)
+        headless: If False, run browser in visible mode for debugging (default: True)
     
     Returns:
         Tuple of (success: bool, status_message: str, total_rows: int or None)
     """
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
             page = browser.new_page()
             
             page.goto(url, wait_until='domcontentloaded', timeout=timeout)
@@ -389,17 +490,165 @@ def url_to_pdf(url, output_path, timeout=120000):
         return False, error_msg, None
 
 
-def process_rows(source_file, output_file, start_row=0, num_rows=None):
+def export_dataset(url, output_path, timeout=120000, headless=True):
     """
-    Process rows from source sheet and write to output sheet
+    Export dataset by navigating to URL, clicking Export button, and downloading the file.
+    
+    Args:
+        url: URL to navigate to
+        output_path: Path object where the downloaded file should be saved
+        timeout: Timeout in milliseconds (default: 120 seconds)
+        headless: If False, run browser in visible mode for debugging (default: True)
+    
+    Returns:
+        Tuple of (success: bool, status_message: str)
+    """
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
+            page = browser.new_page()
+            
+            page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            page.wait_for_timeout(1000)
+            
+            # Download the dataset via Export button
+            download_success, download_status = download_dataset(page, output_path, timeout=60000)
+            
+            browser.close()
+            
+            return download_success, download_status
+    except Exception as e:
+        error_msg = f"ERROR: Could not export dataset: {e}"
+        print(f"  {error_msg}")
+        return False, error_msg
+
+
+def process_row(row, url_source_col, title_source_col, office_source_col, agency_source_col,
+                base_data_dir, output_df, output_file, output_columns, headless=True):
+    """
+    Process a single row from the source sheet.
+    
+    Args:
+        row: Pandas Series representing a single row from the source sheet
+        url_source_col: Column name for URL
+        title_source_col: Column name for title
+        office_source_col: Column name for office
+        agency_source_col: Column name for agency
+        base_data_dir: Base directory for creating title folders
+        output_df: DataFrame to append results to
+        output_file: Path to output Excel file
+        output_columns: List of output column names
+        headless: If False, run browser in visible mode for debugging
+    
+    Returns:
+        Updated output_df
+    """
+    # Extract data from source row
+    url = str(row[url_source_col]).strip() if pd.notna(row[url_source_col]) else ""
+    title = str(row[title_source_col]).strip() if title_source_col and pd.notna(row.get(title_source_col)) else ""
+    office = str(row[office_source_col]).strip() if office_source_col and pd.notna(row.get(office_source_col)) else ""
+    agency = str(row[agency_source_col]).strip() if agency_source_col and pd.notna(row.get(agency_source_col)) else ""
+    
+    print(f"  URL: {url}")
+    print(f"  Title: {title}")
+    
+    # Create folder based on title
+    folder_path = None
+    files_path_str = None
+    if title:
+        folder_path = create_title_folder(base_data_dir, title)
+        if folder_path:
+            files_path_str = str(folder_path)
+            print(f"  Created folder: {files_path_str}")
+        else:
+            print(f"  WARNING: Could not create folder for title")
+    else:
+        print(f"  WARNING: No title available, skipping folder creation")
+    
+    # Create new row for output
+    new_row = {
+        '7_original_distribution_url': url,
+        '4_title': title,
+        '5_agency': office,
+        '5_agency2': agency,
+        'Status': None,
+        'files_path': files_path_str
+    }
+    
+    # Try to access the URL and convert to PDF
+    if url and url.startswith('http'):
+        print(f"  Attempting to access URL...")
+        success, status_msg, status_code, html_content = access_url(url)
+        base_status = status_msg
+        if success:
+            print(f"  ✓ Status: {status_msg}")
+            
+            # Convert URL to PDF and save to working folder
+            if folder_path:
+                pdf_filename = sanitize_folder_name(title, max_length=100) + ".pdf"
+                pdf_path = folder_path / pdf_filename
+                
+                print(f"  Converting URL to PDF using browser...")
+                pdf_success, pdf_status, total_rows = url_to_pdf(url, pdf_path, headless=headless)
+                if pdf_success:
+                    print(f"  ✓ PDF saved: {pdf_path}")
+                    
+                    # Export dataset
+                    dataset_filename = sanitize_folder_name(title, max_length=80) + ".csv"
+                    dataset_path = folder_path / dataset_filename
+                    
+                    print(f"  Exporting dataset...")
+                    download_success, download_status = export_dataset(url, dataset_path, headless=headless)
+                    if download_success:
+                        print(f"  ✓ {download_status}")
+                    elif download_status != "Not attempted":
+                        print(f"  Note: {download_status}")
+                    
+                    # Combine status messages
+                    status_parts = [base_status]
+                    if pdf_status:
+                        status_parts.append(pdf_status)
+                    new_row['Status'] = "; ".join(status_parts)
+                else:
+                    print(f"  ✗ Failed to save PDF")
+                    new_row['Status'] = f"{base_status}; {pdf_status}"
+            else:
+                print(f"  ✗ No folder available for PDF")
+                new_row['Status'] = base_status
+        else:
+            print(f"  ✗ Status: {status_msg}")
+            new_row['Status'] = status_msg
+    else:
+        new_row['Status'] = "Invalid URL"
+        print(f"  ✗ Status: Invalid URL")
+    
+    # Append new row to output DataFrame
+    output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+    
+    # Save output file after each row
+    try:
+        output_df.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"  Saved to output file")
+    except Exception as e:
+        print(f"  ERROR: Could not save output file: {e}")
+        sys.exit(1)
+    
+    return output_df
+
+
+def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=True):
+    """
+    Process rows from source sheet and write to output sheet.
+    Handles setup and cleanup, then calls process_row for each row.
     
     Args:
         source_file: Path to source Excel file
         output_file: Path to output Excel file
         start_row: First eligible row to process (0-indexed)
         num_rows: Number of eligible rows to process (None = all remaining)
+        headless: If False, run browser in visible mode for debugging (default: True)
     """
-    # Get filtered rows
+    # Setup: Get filtered rows
     filtered_df, url_col = get_filtered_rows(source_file)
     
     if len(filtered_df) == 0:
@@ -447,89 +696,18 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None):
         output_df = pd.DataFrame(columns=output_columns)
     
     print(f"\nBase data directory: {base_data_dir}")
+    if not headless:
+        print("DEBUG MODE: Browser will be visible")
     
     # Process each row
     for idx, (_, row) in enumerate(rows_to_process.iterrows(), start=start_row):
         print(f"\n[{idx+1}/{len(rows_to_process)}] Processing row {idx}...")
-        
-        # Extract data from source row
-        url = str(row[url_source_col]).strip() if pd.notna(row[url_source_col]) else ""
-        title = str(row[title_source_col]).strip() if title_source_col and pd.notna(row.get(title_source_col)) else ""
-        office = str(row[office_source_col]).strip() if office_source_col and pd.notna(row.get(office_source_col)) else ""
-        agency = str(row[agency_source_col]).strip() if agency_source_col and pd.notna(row.get(agency_source_col)) else ""
-        
-        print(f"  URL: {url}")
-        print(f"  Title: {title}")
-        
-        # Create folder based on title
-        folder_path = None
-        files_path_str = None
-        if title:
-            folder_path = create_title_folder(base_data_dir, title)
-            if folder_path:
-                files_path_str = str(folder_path)
-                print(f"  Created folder: {files_path_str}")
-            else:
-                print(f"  WARNING: Could not create folder for title")
-        else:
-            print(f"  WARNING: No title available, skipping folder creation")
-        
-        # Create new row for output
-        new_row = {
-            '7_original_distribution_url': url,
-            '4_title': title,
-            '5_agency': office,
-            '5_agency2': agency,
-            'Status': None,
-            'files_path': files_path_str
-        }
-        
-        # Try to access the URL and convert to PDF
-        if url and url.startswith('http'):
-            print(f"  Attempting to access URL...")
-            success, status_msg, status_code, html_content = access_url(url)
-            base_status = status_msg
-            if success:
-                print(f"  ✓ Status: {status_msg}")
-                
-                # Convert URL to PDF and save to working folder
-                if folder_path:
-                    pdf_filename = sanitize_folder_name(title) + ".pdf"
-                    pdf_path = folder_path / pdf_filename
-                    
-                    print(f"  Converting URL to PDF using browser...")
-                    pdf_success, pdf_status, total_rows = url_to_pdf(url, pdf_path)
-                    if pdf_success:
-                        print(f"  ✓ PDF saved: {pdf_path}")
-                        # Combine status messages
-                        status_parts = [base_status]
-                        if pdf_status:
-                            status_parts.append(pdf_status)
-                        new_row['Status'] = "; ".join(status_parts)
-                    else:
-                        print(f"  ✗ Failed to save PDF")
-                        new_row['Status'] = f"{base_status}; {pdf_status}"
-                else:
-                    print(f"  ✗ No folder available for PDF")
-                    new_row['Status'] = base_status
-            else:
-                print(f"  ✗ Status: {status_msg}")
-                new_row['Status'] = status_msg
-        else:
-            new_row['Status'] = "Invalid URL"
-            print(f"  ✗ Status: Invalid URL")
-        
-        # Append new row to output DataFrame
-        output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
-        
-        # Save output file after each row
-        try:
-            output_df.to_excel(output_file, index=False, engine='openpyxl')
-            print(f"  Saved to output file")
-        except Exception as e:
-            print(f"  ERROR: Could not save output file: {e}")
-            sys.exit(1)
+        output_df = process_row(
+            row, url_source_col, title_source_col, office_source_col, agency_source_col,
+            base_data_dir, output_df, output_file, output_columns, headless=headless
+        )
     
+    # Cleanup: Print summary
     print(f"\n{'='*80}")
     print(f"Processing complete! {len(rows_to_process)} rows processed.")
     print(f"Output saved to: {output_file}")
@@ -564,9 +742,17 @@ def main():
         default=None,
         help='Number of eligible rows to process (default: all remaining)'
     )
+    parser.add_argument(
+        '--headless',
+        action='store_false',
+        dest='headless',
+        default=True,
+        help='Run browser in visible mode for debugging (default: headless)'
+    )
+    
     args = parser.parse_args()
     
-    process_rows(args.input, args.output, args.start_row, args.num_rows)
+    process_rows(args.input, args.output, args.start_row, args.num_rows, headless=args.headless)
 
 
 if __name__ == "__main__":
