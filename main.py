@@ -238,15 +238,13 @@ def download_dataset(page, output_path, timeout=60000):
         
         # Set up download listener before clicking Download
         with page.expect_download(timeout=timeout) as download_info:
-            # Find and click Download button in the dialog
-            # Try multiple approaches: direct button text, aria-label, etc.
+            # Find and click Download button in the dialog - look for exact text "Download"
             download_clicked = page.evaluate("""
                 () => {
-                    // Try to find Download button - check multiple selectors
+                    // Try to find Download button with exact label "Download"
                     let downloadButtons = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(el => {
-                        const text = (el.textContent || el.innerText || '').trim().toLowerCase();
-                        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-                        return (text.includes('download') || ariaLabel.includes('download')) && text.length < 100;
+                        const text = (el.textContent || el.innerText || '').trim();
+                        return text === 'Download';
                     });
                     
                     // If not found, try looking in dialogs/modals
@@ -255,16 +253,15 @@ def download_dataset(page, output_path, timeout=60000):
                         for (const dialog of dialogs) {
                             const buttons = Array.from(dialog.querySelectorAll('button, a, [role="button"]'));
                             downloadButtons = buttons.filter(el => {
-                                const text = (el.textContent || el.innerText || '').trim().toLowerCase();
-                                const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-                                return (text.includes('download') || ariaLabel.includes('download')) && text.length < 100;
+                                const text = (el.textContent || el.innerText || '').trim();
+                                return text === 'Download';
                             });
                             if (downloadButtons.length > 0) break;
                         }
                     }
                     
                     if (downloadButtons.length === 0) {
-                        return { success: false, message: 'Download button not found in dialog' };
+                        return { success: false, message: 'Download button with exact label "Download" not found in dialog' };
                     }
                     
                     try {
