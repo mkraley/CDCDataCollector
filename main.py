@@ -330,6 +330,56 @@ def get_description(page):
     return page.evaluate(description_js)
 
 
+def get_keywords(page):
+    """
+    Get keywords from the metadata table.
+    Looks for div.metadata-table with h3 child "Topics", then finds tr with first td "Tags"
+    and extracts textContent from the second td.
+    
+    Args:
+        page: Playwright page object
+    
+    Returns:
+        Keywords text as string, or None if not found
+    """
+    keywords_js = """
+    () => {
+        try {
+            // Find all metadata-table divs
+            const metadataTables = document.querySelectorAll('div.metadata-table');
+            
+            for (const table of metadataTables) {
+                // Check if it has an immediate child h3 with text "Topics"
+                const h3 = table.querySelector(':scope > h3');
+                if (!h3) continue;
+                
+                const h3Text = (h3.textContent || h3.innerText || '').trim();
+                if (h3Text !== 'Topics') continue;
+                
+                // Find tr whose first td has text "Tags"
+                const rows = table.querySelectorAll('tr');
+                for (const row of rows) {
+                    const tds = row.querySelectorAll('td');
+                    if (tds.length < 2) continue;
+                    
+                    const firstTdText = (tds[0].textContent || tds[0].innerText || '').trim();
+                    if (firstTdText === 'Tags') {
+                        // Get textContent of the 2nd td
+                        const keywords = (tds[1].textContent || tds[1].innerText || '').trim();
+                        return keywords || null;
+                    }
+                }
+            }
+            
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+    """
+    return page.evaluate(keywords_js)
+
+
 def show_all_column_rows(page, total_rows, verbose=False):
     """
     Set the rows per page dropdown to show all rows (or 100, whichever is appropriate).
@@ -668,7 +718,8 @@ def create_new_output_row(url, title, office, agency, files_path_str):
         'dataset_size': None,
         'file_extensions': 'PDF, csv',
         '12_download_date_original_source': today,
-        '6_summary_description': None
+        '6_summary_description': None,
+        '8_keywords': None
     }
 
 
@@ -697,7 +748,7 @@ def update_output_data(output_df, new_row, output_file, verbose=False):
             idx = matching_indices[0]
             # Ensure columns that may contain strings are object dtype to avoid dtype warnings
             string_columns = ['dataset_size', 'dataset_rows', 'dataset_cols', 'file_extensions', 
-                            '12_download_date_original_source', '6_summary_description', 'Status', 
+                            '12_download_date_original_source', '6_summary_description', '8_keywords', 'Status', 
                             'path', '7_original_distribution_url', '4_title', '5_agency', '5_agency2']
             for col in string_columns:
                 if col in output_df.columns and output_df[col].dtype != 'object':
@@ -894,11 +945,15 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         # Get description (after read more links have been expanded in convert_source_to_pdf)
         description = get_description(page)
         
+        # Get keywords from metadata table
+        keywords = get_keywords(page)
+        
         # Update output row with dataset information
         new_row['dataset_rows'] = metadata_rows
         new_row['dataset_cols'] = metadata_columns
         new_row['dataset_size'] = format_file_size(dataset_size) if dataset_size is not None else None
-        new_row['summary_description'] = description
+        new_row['6_summary_description'] = description
+        new_row['8_keywords'] = keywords
         
         # Combine status messages
         status_parts = [base_status, pdf_status]
@@ -926,7 +981,8 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         new_row['dataset_rows'] = None
         new_row['dataset_cols'] = None
         new_row['dataset_size'] = None
-        new_row['summary_description'] = None
+        new_row['6_summary_description'] = None
+        new_row['8_keywords'] = None
         if verbose:
             print(f"  ✗ Error: {e}")
         else:
@@ -985,7 +1041,7 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
     
     # Define output columns
     output_columns = ['7_original_distribution_url', '4_title', '5_agency', '5_agency2', 'Status', 'path',
-                      'dataset_rows', 'dataset_cols', 'dataset_size', 'file_extensions', '12_download_date_original_source', '6_summary_description']
+                      'dataset_rows', 'dataset_cols', 'dataset_size', 'file_extensions', '12_download_date_original_source', '6_summary_description', '8_keywords']
     
     # Base directory for creating title folders
     base_data_dir = r'C:\Documents\DataRescue\CDC data'
