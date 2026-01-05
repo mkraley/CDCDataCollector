@@ -232,7 +232,76 @@ def get_number_of_column_rows(page):
     return page.evaluate(read_total_js)
 
 
-def show_all_column_rows(page, total_rows):
+def format_file_size(size_bytes):
+    """
+    Format file size in human-readable format.
+    
+    Args:
+        size_bytes: File size in bytes
+    
+    Returns:
+        Formatted string (e.g., "1.5 MB", "500 KB")
+    """
+    if size_bytes is None:
+        return "unknown"
+    
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            if unit == 'B':
+                return f"{int(size_bytes)} {unit}"
+            else:
+                return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} TB"
+
+
+def get_dataset_metadata(page):
+    """
+    Get dataset metadata (rows and columns) from the metadata-row element.
+    
+    Args:
+        page: Playwright page object
+    
+    Returns:
+        Tuple of (rows: str or None, columns: str or None)
+    """
+    metadata_js = """
+    () => {
+        try {
+            const metadataRow = document.querySelector('dl.metadata-row');
+            if (!metadataRow) return { rows: null, columns: null };
+            
+            const pairs = metadataRow.querySelectorAll('.metadata-pair');
+            let rows = null;
+            let columns = null;
+            
+            for (const pair of pairs) {
+                const key = pair.querySelector('.metadata-pair-key');
+                const value = pair.querySelector('.metadata-pair-value');
+                
+                if (!key || !value) continue;
+                
+                const keyText = (key.textContent || key.innerText || '').trim();
+                const valueText = (value.textContent || value.innerText || '').trim();
+                
+                if (keyText === 'Rows') {
+                    rows = valueText;
+                } else if (keyText === 'Columns') {
+                    columns = valueText;
+                }
+            }
+            
+            return { rows: rows, columns: columns };
+        } catch (e) {
+            return { rows: null, columns: null };
+        }
+    }
+    """
+    result = page.evaluate(metadata_js)
+    return result.get('rows'), result.get('columns')
+
+
+def show_all_column_rows(page, total_rows, verbose=False):
     """
     Set the rows per page dropdown to show all rows (or 100, whichever is appropriate).
     If total_rows > 100, updates the "100" option to the actual number first.
@@ -240,13 +309,15 @@ def show_all_column_rows(page, total_rows):
     Args:
         page: Playwright page object
         total_rows: Total number of rows (int or None)
+        verbose: If True, print status messages
     
     Returns:
         bool - True if successful, False otherwise
     """
     try:
         if total_rows is not None:
-            print(f"  Total rows: {total_rows}")
+            if verbose:
+                print(f"  Total rows: {total_rows}")
             target_page_size = total_rows if total_rows > 100 else 100
             
             set_rows_js = f"""
@@ -302,15 +373,18 @@ def show_all_column_rows(page, total_rows):
             rows_result = page.evaluate(set_rows_js)
             
             if rows_result and rows_result.get('success'):
-                print(f"  Set rows per page to {target_page_size}")
+                if verbose:
+                    print(f"  Set rows per page to {target_page_size}")
                 page.wait_for_timeout(2000)  # Wait for rows to load
                 return True
             else:
                 error_msg = rows_result.get('message', 'Could not change rows per page') if rows_result else 'Dropdown not found'
-                print(f"  Note: {error_msg}")
+                if verbose:
+                    print(f"  Note: {error_msg}")
                 return False
         else:
-            print(f"  Note: Could not read total rows, defaulting to 100")
+            if verbose:
+                print(f"  Note: Could not read total rows, defaulting to 100")
             # Fallback to 100 if we can't read the total
             set_rows_js = """
             () => {
@@ -353,16 +427,18 @@ def show_all_column_rows(page, total_rows):
             page.wait_for_timeout(2000)
             return True
     except Exception as e:
-        print(f"  Note: Could not change rows per page dropdown: {e}")
+        if verbose:
+            print(f"  Note: Could not change rows per page dropdown: {e}")
         return False
 
 
-def expand_read_more_links(page):
+def expand_read_more_links(page, verbose=False):
     """
     Find and click "Read more" links/buttons to expand content.
     
     Args:
         page: Playwright page object
+        verbose: If True, print status messages
     
     Returns:
         int - number of links clicked
@@ -395,11 +471,13 @@ def expand_read_more_links(page):
     try:
         clicked_count = page.evaluate(expand_js, expand_keywords)
         if clicked_count > 0:
-            print(f"  Expanded {clicked_count} 'Read more' sections")
+            if verbose:
+                print(f"  Expanded {clicked_count} 'Read more' sections")
             page.wait_for_timeout(1500)
         return clicked_count
     except Exception as e:
-        print(f"  Note: Could not expand 'Read more' links: {e}")
+        if verbose:
+            print(f"  Note: Could not expand 'Read more' links: {e}")
         return 0
 
 
@@ -557,23 +635,48 @@ def create_new_output_row(url, title, office, agency, files_path_str):
     }
 
 
-def update_output_data(output_df, new_row, output_file):
+def update_output_data(output_df, new_row, output_file, verbose=False):
     """
-    Append a new row to the output DataFrame and save to file.
+    Update or append a row to the output DataFrame and save to file.
+    If a row with the same URL already exists, it will be updated instead of creating a duplicate.
     
     Args:
-        output_df: DataFrame to append to
+        output_df: DataFrame to update/append to
         new_row: Dictionary representing the new row
         output_file: Path to output Excel file
+        verbose: If True, print status messages
     
     Returns:
         Updated output_df
     """
-    output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+    url = new_row.get('7_original_distribution_url')
+    
+    # Check if a row with the same URL already exists
+    if url and '7_original_distribution_url' in output_df.columns:
+        matching_indices = output_df[output_df['7_original_distribution_url'] == url].index
+        
+        if len(matching_indices) > 0:
+            # Update the first matching row (in case there are duplicates)
+            idx = matching_indices[0]
+            for key, value in new_row.items():
+                output_df.at[idx, key] = value
+            if verbose:
+                print(f"  Updated existing row in output file")
+        else:
+            # No matching row found, append new row
+            output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+            if verbose:
+                print(f"  Added new row to output file")
+    else:
+        # No URL to match on, just append
+        output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+        if verbose:
+            print(f"  Added new row to output file")
     
     try:
         output_df.to_excel(output_file, index=False, engine='openpyxl')
-        print(f"  Saved to output file")
+        if verbose:
+            print(f"  Saved to output file")
     except Exception as e:
         print(f"  ERROR: Could not save output file: {e}")
         sys.exit(1)
@@ -583,7 +686,7 @@ def update_output_data(output_df, new_row, output_file):
 
 
 
-def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True):
+def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True, verbose=False):
     """
     Convert a source URL to PDF in a browser session.
     Sets rows per page, expands content, and generates PDF.
@@ -593,6 +696,7 @@ def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True):
         pdf_path: Path object where PDF should be saved
         timeout: Timeout in milliseconds (default: 120 seconds)
         headless: If False, run browser in visible mode for debugging (default: True)
+        verbose: If True, print status messages
     
     Returns:
         Tuple of (page: Playwright page object, browser: Playwright browser object, 
@@ -613,10 +717,10 @@ def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True):
         total_rows = get_number_of_column_rows(page)
         
         # Show all column rows (set dropdown)
-        show_all_column_rows(page, total_rows)
+        show_all_column_rows(page, total_rows, verbose=verbose)
         
         # Expand read more links
-        expand_read_more_links(page)
+        expand_read_more_links(page, verbose=verbose)
         
         # Generate PDF
         page.pdf(path=str(pdf_path), format='A4', print_background=True)
@@ -629,12 +733,13 @@ def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True):
         if playwright:
             playwright.stop()
         error_msg = f"ERROR: Could not convert source to PDF: {e}"
-        print(f"  {error_msg}")
+        if verbose:
+            print(f"  {error_msg}")
         raise Exception(error_msg)
 
 
 def process_row(row, url_source_col, title_source_col, office_source_col, agency_source_col,
-                base_data_dir, output_df, output_file, output_columns, headless=True):
+                base_data_dir, output_df, output_file, output_columns, headless=True, verbose=False, idx=None, total=None):
     """
     Process a single row from the source sheet.
     
@@ -649,6 +754,9 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         output_file: Path to output Excel file
         output_columns: List of output column names
         headless: If False, run browser in visible mode for debugging
+        verbose: If True, show detailed logging
+        idx: Row index for logging (optional)
+        total: Total number of rows for logging (optional)
     
     Returns:
         Updated output_df
@@ -656,17 +764,20 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
     # Get source data
     url, title, office, agency = get_source_data(row, url_source_col, title_source_col, office_source_col, agency_source_col)
     
-    print(f"  URL: {url}")
-    print(f"  Title: {title}")
+    if verbose:
+        print(f"  URL: {url}")
+        print(f"  Title: {title}")
     
     # Create data folder
     folder_path = create_data_folder(base_data_dir, title)
     if not folder_path:
-        print(f"  ERROR: Could not create folder for title")
+        if verbose:
+            print(f"  ERROR: Could not create folder for title")
         sys.exit(1)
     
     files_path_str = str(folder_path)
-    print(f"  Created folder: {files_path_str}")
+    if verbose:
+        print(f"  Created folder: {files_path_str}")
     
     # Create new output row
     new_row = create_new_output_row(url, title, office, agency, files_path_str)
@@ -674,20 +785,30 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
     # Validate URL
     if not url or not url.startswith('http'):
         new_row['Status'] = "Invalid URL"
-        print(f"  ✗ Status: Invalid URL")
+        if verbose:
+            print(f"  ✗ Status: Invalid URL")
+        else:
+            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            print(f"{idx_str}{url} - Invalid URL")
         output_df = update_output_data(output_df, new_row, output_file)
         return output_df
     
     # Access URL
-    print(f"  Attempting to access URL...")
+    if verbose:
+        print(f"  Attempting to access URL...")
     success, status_msg, status_code, html_content = access_url(url)
     if not success:
         new_row['Status'] = status_msg
-        print(f"  ✗ Status: {status_msg}")
+        if verbose:
+            print(f"  ✗ Status: {status_msg}")
+        else:
+            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            print(f"{idx_str}{url} - {status_msg}")
         output_df = update_output_data(output_df, new_row, output_file)
         return output_df
     
-    print(f"  ✓ Status: {status_msg}")
+    if verbose:
+        print(f"  ✓ Status: {status_msg}")
     base_status = status_msg
     
     # Prepare file paths
@@ -697,28 +818,61 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
     dataset_filename = sanitize_folder_name(title, max_length=80) + ".csv"
     dataset_path = folder_path / dataset_filename
     
-    print(f"  Processing URL (PDF + Export)...")
+    if verbose:
+        print(f"  Processing URL (PDF + Export)...")
     
     # Convert source to PDF
     browser = None
     playwright = None
+    problems = []
     try:
-        page, browser, playwright, pdf_status, total_rows = convert_source_to_pdf(url, pdf_path, headless=headless)
-        print(f"  ✓ PDF saved: {pdf_path}")
+        page, browser, playwright, pdf_status, total_rows = convert_source_to_pdf(url, pdf_path, headless=headless, verbose=verbose)
+        if verbose:
+            print(f"  ✓ PDF saved: {pdf_path}")
         
         # Download dataset
         download_success, download_status = download_dataset(page, dataset_path, timeout=60000)
         if download_success:
-            print(f"  ✓ {download_status}")
+            if verbose:
+                print(f"  ✓ {download_status}")
         else:
-            print(f"  Note: {download_status}")
+            problems.append(download_status)
+            if verbose:
+                print(f"  Note: {download_status}")
+        
+        # Get metadata and file size
+        metadata_rows, metadata_columns = get_dataset_metadata(page)
+        dataset_size = None
+        if dataset_path.exists():
+            dataset_size = dataset_path.stat().st_size
         
         # Combine status messages
         status_parts = [base_status, pdf_status]
         new_row['Status'] = "; ".join(status_parts)
+        
+        # Log success (normal or verbose mode)
+        if verbose:
+            if metadata_rows and metadata_columns:
+                print(f"  Dataset: {metadata_rows} rows, {metadata_columns} columns")
+            if dataset_size is not None:
+                print(f"  Dataset size: {format_file_size(dataset_size)}")
+        else:
+            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            rows_str = metadata_rows if metadata_rows else "?"
+            cols_str = metadata_columns if metadata_columns else "?"
+            size_str = format_file_size(dataset_size) if dataset_size is not None else "unknown"
+            print(f"{idx_str}{url} - {rows_str} rows, {cols_str} columns, {size_str}")
+            if problems:
+                for problem in problems:
+                    print(f"  {problem}")
     except Exception as e:
+        problems.append(str(e))
         new_row['Status'] = f"{base_status}; {str(e)}"
-        print(f"  ✗ Error: {e}")
+        if verbose:
+            print(f"  ✗ Error: {e}")
+        else:
+            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            print(f"{idx_str}{url} - Error: {e}")
     finally:
         if browser:
             browser.close()
@@ -726,12 +880,12 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
             playwright.stop()
     
     # Update output data (append row and save)
-    output_df = update_output_data(output_df, new_row, output_file)
+    output_df = update_output_data(output_df, new_row, output_file, verbose=verbose)
     
     return output_df
 
 
-def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=True):
+def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=True, verbose=False):
     """
     Process rows from source sheet and write to output sheet.
     Handles setup and cleanup, then calls process_row for each row.
@@ -742,6 +896,7 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
         start_row: First eligible row to process (0-indexed)
         num_rows: Number of eligible rows to process (None = all remaining)
         headless: If False, run browser in visible mode for debugging (default: True)
+        verbose: If True, show detailed logging (default: False)
     """
     # Setup: Get filtered rows
     filtered_df, url_col = get_filtered_rows(source_file)
@@ -796,10 +951,12 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
     
     # Process each row
     for idx, (_, row) in enumerate(rows_to_process.iterrows(), start=start_row):
-        print(f"\n[{idx}/{len(rows_to_process)}] Processing row {idx}...")
+        if verbose:
+            print(f"\n[{idx}/{len(rows_to_process)}] Processing row {idx}...")
         output_df = process_row(
             row, url_source_col, title_source_col, office_source_col, agency_source_col,
-            base_data_dir, output_df, output_file, output_columns, headless=headless
+            base_data_dir, output_df, output_file, output_columns, headless=headless,
+            verbose=verbose, idx=idx, total=len(rows_to_process)
         )
     
     # Cleanup: Print summary
