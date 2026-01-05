@@ -116,7 +116,7 @@ def sanitize_folder_name(name, max_length=100):
     return sanitized
 
 
-def create_title_folder(base_dir, title):
+def create_title_folder(base_dir, title, verbose=False):
     """
     Create or reuse a folder named after the title and return the full path.
     If the folder already exists, clears all files in it.
@@ -124,6 +124,7 @@ def create_title_folder(base_dir, title):
     Args:
         base_dir: Base directory path
         title: Title to use for folder name
+        verbose: If True, print status messages
     
     Returns:
         Path object for the created/cleared folder, or None if creation failed
@@ -150,7 +151,8 @@ def create_title_folder(base_dir, title):
                     item.unlink()
                 elif item.is_dir():
                     shutil.rmtree(item)
-            print(f"  Cleared existing folder: {folder_path}")
+            if verbose:
+                print(f"  Cleared existing folder: {folder_path}")
         except Exception as e:
             print(f"  WARNING: Could not clear existing folder: {e}")
             # Try to continue anyway
@@ -299,6 +301,33 @@ def get_dataset_metadata(page):
     """
     result = page.evaluate(metadata_js)
     return result.get('rows'), result.get('columns')
+
+
+def get_description(page):
+    """
+    Get description text from div.description-section element.
+    
+    Args:
+        page: Playwright page object
+    
+    Returns:
+        Description text as string, or None if not found
+    """
+    description_js = """
+    () => {
+        try {
+            const descriptionSection = document.querySelector('div.description-section');
+            if (!descriptionSection) return null;
+            
+            // Get all text content from the description section
+            const text = (descriptionSection.textContent || descriptionSection.innerText || '').trim();
+            return text || null;
+        } catch (e) {
+            return null;
+        }
+    }
+    """
+    return page.evaluate(description_js)
 
 
 def show_all_column_rows(page, total_rows, verbose=False):
@@ -597,18 +626,19 @@ def get_source_data(row, url_source_col, title_source_col, office_source_col, ag
     return url, title, office, agency
 
 
-def create_data_folder(base_data_dir, title):
+def create_data_folder(base_data_dir, title, verbose=False):
     """
     Create a data folder based on title (alias for create_title_folder for consistency).
     
     Args:
         base_data_dir: Base directory for creating title folders
         title: Title to use for folder name
+        verbose: If True, print status messages
     
     Returns:
         Path object for the created folder, or None if creation failed
     """
-    return create_title_folder(base_data_dir, title)
+    return create_title_folder(base_data_dir, title, verbose=verbose)
 
 
 def create_new_output_row(url, title, office, agency, files_path_str):
@@ -625,13 +655,20 @@ def create_new_output_row(url, title, office, agency, files_path_str):
     Returns:
         Dictionary representing the output row
     """
+    today = datetime.now().strftime('%Y-%m-%d')
     return {
         '7_original_distribution_url': url,
         '4_title': title,
-        '5_agency': office,
-        '5_agency2': agency,
+        '5_agency': agency,  # Swapped: Agency goes to 5_agency
+        '5_agency2': office,  # Swapped: Office goes to 5_agency2
         'Status': None,
-        'files_path': files_path_str
+        'path': files_path_str,
+        'dataset_rows': None,
+        'dataset_cols': None,
+        'dataset_size': None,
+        'file_extensions': 'PDF, csv',
+        '12_download_date_original_source': today,
+        '6_summary_description': None
     }
 
 
@@ -658,6 +695,14 @@ def update_output_data(output_df, new_row, output_file, verbose=False):
         if len(matching_indices) > 0:
             # Update the first matching row (in case there are duplicates)
             idx = matching_indices[0]
+            # Ensure columns that may contain strings are object dtype to avoid dtype warnings
+            string_columns = ['dataset_size', 'dataset_rows', 'dataset_cols', 'file_extensions', 
+                            '12_download_date_original_source', '6_summary_description', 'Status', 
+                            'path', '7_original_distribution_url', '4_title', '5_agency', '5_agency2']
+            for col in string_columns:
+                if col in output_df.columns and output_df[col].dtype != 'object':
+                    output_df[col] = output_df[col].astype('object')
+            
             for key, value in new_row.items():
                 output_df.at[idx, key] = value
             if verbose:
@@ -769,7 +814,7 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         print(f"  Title: {title}")
     
     # Create data folder
-    folder_path = create_data_folder(base_data_dir, title)
+    folder_path = create_data_folder(base_data_dir, title, verbose=verbose)
     if not folder_path:
         if verbose:
             print(f"  ERROR: Could not create folder for title")
@@ -846,6 +891,15 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         if dataset_path.exists():
             dataset_size = dataset_path.stat().st_size
         
+        # Get description (after read more links have been expanded in convert_source_to_pdf)
+        description = get_description(page)
+        
+        # Update output row with dataset information
+        new_row['dataset_rows'] = metadata_rows
+        new_row['dataset_cols'] = metadata_columns
+        new_row['dataset_size'] = format_file_size(dataset_size) if dataset_size is not None else None
+        new_row['summary_description'] = description
+        
         # Combine status messages
         status_parts = [base_status, pdf_status]
         new_row['Status'] = "; ".join(status_parts)
@@ -868,6 +922,11 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
     except Exception as e:
         problems.append(str(e))
         new_row['Status'] = f"{base_status}; {str(e)}"
+        # Set dataset fields to None on error
+        new_row['dataset_rows'] = None
+        new_row['dataset_cols'] = None
+        new_row['dataset_size'] = None
+        new_row['summary_description'] = None
         if verbose:
             print(f"  ✗ Error: {e}")
         else:
@@ -925,7 +984,8 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
     agency_source_col = find_column(filtered_df, ['Agency'])
     
     # Define output columns
-    output_columns = ['7_original_distribution_url', '4_title', '5_agency', '5_agency2', 'Status', 'files_path']
+    output_columns = ['7_original_distribution_url', '4_title', '5_agency', '5_agency2', 'Status', 'path',
+                      'dataset_rows', 'dataset_cols', 'dataset_size', 'file_extensions', '12_download_date_original_source', '6_summary_description']
     
     # Base directory for creating title folders
     base_data_dir = r'C:\Documents\DataRescue\CDC data'
@@ -945,7 +1005,8 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
     else:
         output_df = pd.DataFrame(columns=output_columns)
     
-    print(f"\nBase data directory: {base_data_dir}")
+    if verbose:
+        print(f"\nBase data directory: {base_data_dir}")
     if not headless:
         print("DEBUG MODE: Browser will be visible")
     
