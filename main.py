@@ -289,20 +289,20 @@ def download_dataset(page, output_path, timeout=60000):
         return False, f"Error downloading dataset: {str(e)[:100]}"
 
 
-def url_to_pdf(url, output_path, timeout=120000, headless=True):
+def process_url(url, pdf_path, dataset_path, timeout=120000, headless=True):
     """
-    Convert a URL to PDF using Playwright (headless browser)
-    Expands "Read more" links before generating PDF to capture full content
-    Changes "Rows per page" dropdown to 100 if available
+    Process a URL in a single browser session: set rows per page, expand content, generate PDF, and export dataset.
     
     Args:
-        url: URL to convert to PDF
-        output_path: Path object where PDF should be saved
+        url: URL to process
+        pdf_path: Path object where PDF should be saved
+        dataset_path: Path object where dataset CSV should be saved
         timeout: Timeout in milliseconds (default: 120 seconds)
         headless: If False, run browser in visible mode for debugging (default: True)
     
     Returns:
-        Tuple of (success: bool, status_message: str, total_rows: int or None)
+        Tuple of (pdf_success: bool, pdf_status: str, total_rows: int or None, 
+                 download_success: bool, download_status: str)
     """
     try:
         with sync_playwright() as p:
@@ -312,73 +312,10 @@ def url_to_pdf(url, output_path, timeout=120000, headless=True):
             page.goto(url, wait_until='domcontentloaded', timeout=timeout)
             page.wait_for_timeout(500)
             
-            # Find and click "Read more" links/buttons to expand content
-            expand_keywords = ['read more', 'show more', 'expand', 'see more', 'view more', 
-                             'read full', 'show full', 'view full', 'continue reading']
-            
-            expand_js = """
-            (keywords) => {
-                const clicked = new Set();
-                let count = 0;
-                const maxClicks = 50;
-                
-                function findAndClick(keyword) {
-                    const allElements = document.querySelectorAll('a, button, [role="button"], span, div');
-                    
-                    for (const el of allElements) {
-                        if (count >= maxClicks) break;
-                        
-                        const text = (el.textContent || el.innerText || '').trim();
-                        const textLower = text.toLowerCase();
-                        
-                        if (textLower.includes(keyword.toLowerCase()) && text.length < 100 && text.length > 0) {
-                            const elId = el.tagName + '|' + (el.className || '') + '|' + text.substring(0, 50);
-                            
-                            if (!clicked.has(elId)) {
-                                const rect = el.getBoundingClientRect();
-                                const style = window.getComputedStyle(el);
-                                
-                                if (rect.width > 0 && rect.height > 0 && 
-                                    style.display !== 'none' && style.visibility !== 'hidden' &&
-                                    parseFloat(style.opacity) > 0) {
-                                    
-                                    try {
-                                        el.scrollIntoView({ behavior: 'auto', block: 'center' });
-                                        el.click();
-                                        clicked.add(elId);
-                                        count++;
-                                    } catch (e) {
-                                        // Element might not be clickable, skip
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                for (const keyword of keywords) {
-                    if (count >= maxClicks) break;
-                    findAndClick(keyword);
-                }
-                
-                return count;
-            }
-            """
-            
-            try:
-                clicked_count = page.evaluate(expand_js, expand_keywords)
-                if clicked_count > 0:
-                    print(f"  Expanded {clicked_count} 'Read more' sections")
-                    # page.wait_for_timeout(1500)
-            except Exception as e:
-                print(f"  Note: Could not expand 'Read more' links: {e}")
-            
-            # Change "Rows per page" to 100 to show more data
+            # FIRST: Change "Rows per page" to 100 to show more data (before expanding Read more)
             total_rows = None
             rows_status_msg = None
             try:
-                page.wait_for_timeout(500)
-                
                 set_rows_js = """
                 () => {
                     try {
@@ -420,7 +357,7 @@ def url_to_pdf(url, output_path, timeout=120000, headless=True):
                 rows_result = page.evaluate(set_rows_js)
                 
                 if rows_result and rows_result.get('success'):
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(2000)  # Wait for rows to load
                     
                     read_total_js = """
                     () => {
@@ -467,57 +404,57 @@ def url_to_pdf(url, output_path, timeout=120000, headless=True):
                 rows_status_msg = f"Error changing rows per page: {str(e)[:50]}"
                 print(f"  Note: Could not change rows per page dropdown: {e}")
             
-            # Generate PDF
-            page.pdf(path=str(output_path), format='A4', print_background=True)
+            # SECOND: Find and click "Read more" links/buttons to expand content (now that all rows are visible)
+            expand_keywords = ['read more']
             
-            # Close browser
+            expand_js = """
+            (keywords) => {
+                const clicked = new Set();
+                let count = 0;
+                const maxClicks = 100;
+                
+                function findAndClick(keyword) {
+                    const allElements = document.querySelectorAll('forge-button.collapse-button');
+                    for (const el of allElements) {
+                        el.click();
+                        count++;
+                    }
+                }
+                
+                for (const keyword of keywords) {
+                    if (count >= maxClicks) break;
+                    findAndClick(keyword);
+                }
+                
+                return count;
+            }
+            """
+            
+            try:
+                clicked_count = page.evaluate(expand_js, expand_keywords)
+                if clicked_count > 0:
+                    print(f"  Expanded {clicked_count} 'Read more' sections")
+                    page.wait_for_timeout(1500)
+            except Exception as e:
+                print(f"  Note: Could not expand 'Read more' links: {e}")
+            
+            # THIRD: Generate PDF
+            page.pdf(path=str(pdf_path), format='A4', print_background=True)
+            pdf_status_parts = []
+            if rows_status_msg and 'Set to 100' in rows_status_msg:
+                pdf_status_parts.append(rows_status_msg)
+            pdf_status = "; ".join(pdf_status_parts) if pdf_status_parts else "PDF generated"
+            
+            # FOURTH: Export dataset via Export button
+            download_success, download_status = download_dataset(page, dataset_path, timeout=60000)
+            
             browser.close()
         
-        # Build status message
-        status_parts = []
-        if rows_status_msg and 'Set to 100' in rows_status_msg:
-            status_parts.append(rows_status_msg)
-        
-        status_message = "; ".join(status_parts) if status_parts else "PDF generated"
-        
-        return True, status_message, total_rows
+        return True, pdf_status, total_rows, download_success, download_status
     except Exception as e:
-        error_msg = f"ERROR: Could not convert URL to PDF: {e}"
+        error_msg = f"ERROR: Could not process URL: {e}"
         print(f"  {error_msg}")
-        return False, error_msg, None
-
-
-def export_dataset(url, output_path, timeout=120000, headless=True):
-    """
-    Export dataset by navigating to URL, clicking Export button, and downloading the file.
-    
-    Args:
-        url: URL to navigate to
-        output_path: Path object where the downloaded file should be saved
-        timeout: Timeout in milliseconds (default: 120 seconds)
-        headless: If False, run browser in visible mode for debugging (default: True)
-    
-    Returns:
-        Tuple of (success: bool, status_message: str)
-    """
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
-            page = browser.new_page()
-            
-            page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            page.wait_for_timeout(1000)
-            
-            # Download the dataset via Export button
-            download_success, download_status = download_dataset(page, output_path, timeout=60000)
-            
-            browser.close()
-            
-            return download_success, download_status
-    except Exception as e:
-        error_msg = f"ERROR: Could not export dataset: {e}"
-        print(f"  {error_msg}")
-        return False, error_msg
+        return False, error_msg, None, False, "Not attempted"
 
 
 def process_row(row, url_source_col, title_source_col, office_source_col, agency_source_col,
@@ -585,30 +522,31 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
                 pdf_filename = sanitize_folder_name(title, max_length=100) + ".pdf"
                 pdf_path = folder_path / pdf_filename
                 
-                print(f"  Converting URL to PDF using browser...")
-                pdf_success, pdf_status, total_rows = url_to_pdf(url, pdf_path, headless=headless)
+                print(f"  Processing URL (PDF + Export)...")
+                
+                # Export dataset
+                dataset_filename = sanitize_folder_name(title, max_length=80) + ".csv"
+                dataset_path = folder_path / dataset_filename
+                
+                pdf_success, pdf_status, total_rows, download_success, download_status = process_url(
+                    url, pdf_path, dataset_path, headless=headless
+                )
+                
                 if pdf_success:
                     print(f"  ✓ PDF saved: {pdf_path}")
-                    
-                    # Export dataset
-                    dataset_filename = sanitize_folder_name(title, max_length=80) + ".csv"
-                    dataset_path = folder_path / dataset_filename
-                    
-                    print(f"  Exporting dataset...")
-                    download_success, download_status = export_dataset(url, dataset_path, headless=headless)
-                    if download_success:
-                        print(f"  ✓ {download_status}")
-                    elif download_status != "Not attempted":
-                        print(f"  Note: {download_status}")
-                    
-                    # Combine status messages
-                    status_parts = [base_status]
-                    if pdf_status:
-                        status_parts.append(pdf_status)
-                    new_row['Status'] = "; ".join(status_parts)
                 else:
                     print(f"  ✗ Failed to save PDF")
-                    new_row['Status'] = f"{base_status}; {pdf_status}"
+                
+                if download_success:
+                    print(f"  ✓ {download_status}")
+                elif download_status != "Not attempted":
+                    print(f"  Note: {download_status}")
+                
+                # Combine status messages
+                status_parts = [base_status]
+                if pdf_status:
+                    status_parts.append(pdf_status)
+                new_row['Status'] = "; ".join(status_parts)
             else:
                 print(f"  ✗ No folder available for PDF")
                 new_row['Status'] = base_status
