@@ -312,97 +312,147 @@ def process_url(url, pdf_path, dataset_path, timeout=120000, headless=True):
             page.goto(url, wait_until='domcontentloaded', timeout=timeout)
             page.wait_for_timeout(500)
             
-            # FIRST: Change "Rows per page" to 100 to show more data (before expanding Read more)
+            # FIRST: Get actual number of rows and set rows per page accordingly (before expanding Read more)
             total_rows = None
-            rows_status_msg = None
             try:
-                set_rows_js = """
+                # First, read the current total rows from the legend
+                read_total_js = """
                 () => {
                     try {
                         const fp = document.querySelector('forge-paginator');
-                        if (!fp) {
-                            return { success: false, message: 'forge-paginator not found', totalRows: null };
-                        }
+                        if (!fp || !fp.shadowRoot) return null;
                         
-                        const fs = fp.shadowRoot.querySelector('forge-select');
-                        if (!fs) {
-                            return { success: false, message: 'forge-select not found', totalRows: null };
-                        }
+                        const rangeLabel = fp.shadowRoot.querySelector('.range-label');
+                        if (!rangeLabel) return null;
                         
-                        fs.value = '100';
-                        fp.pageSize = 100;
-                        
-                        const changeEvent = new Event('change', { bubbles: true, cancelable: true });
-                        fs.dispatchEvent(changeEvent);
-                        
-                        const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
-                            bubbles: true,
-                            cancelable: true,
-                            detail: {
-                                type: 'page-size',
-                                pageSize: 100,
-                                pageIndex: fp.pageIndex || 0,
-                                offset: fp.offset || 0
+                        let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
+                        const slot = rangeLabel.querySelector('slot[name="range-label"]');
+                        if (slot && slot.assignedNodes) {
+                            const assigned = slot.assignedNodes();
+                            if (assigned.length > 0) {
+                                rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
                             }
-                        });
-                        fp.dispatchEvent(paginatorChangeEvent);
+                        }
                         
-                        return { success: true, message: 'Set to 100', totalRows: null };
+                        const match = rangeText.match(/of\\s+(\\d+)/i);
+                        return match ? parseInt(match[1]) : null;
                     } catch (e) {
-                        return { success: false, message: 'Error: ' + e.message, totalRows: null };
+                        return null;
                     }
                 }
                 """
                 
-                rows_result = page.evaluate(set_rows_js)
+                total_rows = page.evaluate(read_total_js)
                 
-                if rows_result and rows_result.get('success'):
-                    page.wait_for_timeout(2000)  # Wait for rows to load
+                if total_rows is not None:
+                    print(f"  Total rows: {total_rows}")
                     
-                    read_total_js = """
+                    # Determine the target page size
+                    target_page_size = total_rows if total_rows > 100 else 100
+                    
+                    set_rows_js = f"""
+                    () => {{
+                        try {{
+                            const fp = document.querySelector('forge-paginator');
+                            if (!fp) {{
+                                return {{ success: false, message: 'forge-paginator not found', totalRows: null }};
+                            }}
+                            
+                            const fs = fp.shadowRoot.querySelector('forge-select');
+                            if (!fs) {{
+                                return {{ success: false, message: 'forge-select not found', totalRows: null }};
+                            }}
+                            
+                            const targetSize = {target_page_size};
+                            
+                            // If target size > 100, update the "100" option to the actual number
+                            if (targetSize > 100) {{
+                                const option100 = fs.querySelector('forge-option[label="100"]');
+                                if (option100) {{
+                                    option100.setAttribute('label', targetSize.toString());
+                                    option100.textContent = targetSize.toString();
+                                }}
+                            }}
+                            
+                            // Set the value
+                            fs.value = targetSize.toString();
+                            fp.pageSize = targetSize;
+                            
+                            const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+                            fs.dispatchEvent(changeEvent);
+                            
+                            const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {{
+                                bubbles: true,
+                                cancelable: true,
+                                detail: {{
+                                    type: 'page-size',
+                                    pageSize: targetSize,
+                                    pageIndex: fp.pageIndex || 0,
+                                    offset: fp.offset || 0
+                                }}
+                            }});
+                            fp.dispatchEvent(paginatorChangeEvent);
+                            
+                            return {{ success: true, message: 'Set to ' + targetSize, totalRows: null }};
+                        }} catch (e) {{
+                            return {{ success: false, message: 'Error: ' + e.message, totalRows: null }};
+                        }}
+                    }}
+                    """
+                    
+                    rows_result = page.evaluate(set_rows_js)
+                    
+                    if rows_result and rows_result.get('success'):
+                        print(f"  Set rows per page to {target_page_size}")
+                        page.wait_for_timeout(2000)  # Wait for rows to load
+                    else:
+                        error_msg = rows_result.get('message', 'Could not change rows per page') if rows_result else 'Dropdown not found'
+                        print(f"  Note: {error_msg}")
+                else:
+                    print(f"  Note: Could not read total rows, defaulting to 100")
+                    # Fallback to 100 if we can't read the total
+                    set_rows_js = """
                     () => {
                         try {
                             const fp = document.querySelector('forge-paginator');
-                            if (!fp || !fp.shadowRoot) return null;
-                            
-                            const rangeLabel = fp.shadowRoot.querySelector('.range-label');
-                            if (!rangeLabel) return null;
-                            
-                            let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
-                            const slot = rangeLabel.querySelector('slot[name="range-label"]');
-                            if (slot && slot.assignedNodes) {
-                                const assigned = slot.assignedNodes();
-                                if (assigned.length > 0) {
-                                    rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
-                                }
+                            if (!fp) {
+                                return { success: false, message: 'forge-paginator not found', totalRows: null };
                             }
                             
-                            const match = rangeText.match(/of\\s+(\\d+)/i);
-                            return match ? parseInt(match[1]) : null;
+                            const fs = fp.shadowRoot.querySelector('forge-select');
+                            if (!fs) {
+                                return { success: false, message: 'forge-select not found', totalRows: null };
+                            }
+                            
+                            fs.value = '100';
+                            fp.pageSize = 100;
+                            
+                            const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+                            fs.dispatchEvent(changeEvent);
+                            
+                            const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
+                                bubbles: true,
+                                cancelable: true,
+                                detail: {
+                                    type: 'page-size',
+                                    pageSize: 100,
+                                    pageIndex: fp.pageIndex || 0,
+                                    offset: fp.offset || 0
+                                }
+                            });
+                            fp.dispatchEvent(paginatorChangeEvent);
+                            
+                            return { success: true, message: 'Set to 100', totalRows: null };
                         } catch (e) {
-                            return null;
+                            return { success: false, message: 'Error: ' + e.message, totalRows: null };
                         }
                     }
                     """
-                    
-                    total_rows = page.evaluate(read_total_js)
-                    
-                    if total_rows is not None:
-                        print(f"  Set rows per page to 100. Total rows: {total_rows}")
-                        if total_rows > 100:
-                            rows_status_msg = f"Set to 100 (Note: {total_rows} total rows > 100)"
-                            print(f"  WARNING: {total_rows} total rows exceeds 100, not all rows may be visible")
-                        else:
-                            rows_status_msg = "Set to 100"
-                    else:
-                        rows_status_msg = "Set to 100 (count unknown)"
-                else:
-                    rows_status_msg = rows_result.get('message', 'Could not change rows per page') if rows_result else 'Dropdown not found'
-                    print(f"  Note: {rows_status_msg}")
-                    total_rows = None
+                    page.evaluate(set_rows_js)
+                    page.wait_for_timeout(2000)
             except Exception as e:
-                rows_status_msg = f"Error changing rows per page: {str(e)[:50]}"
                 print(f"  Note: Could not change rows per page dropdown: {e}")
+                total_rows = None
             
             # SECOND: Find and click "Read more" links/buttons to expand content (now that all rows are visible)
             expand_keywords = ['read more']
@@ -440,10 +490,7 @@ def process_url(url, pdf_path, dataset_path, timeout=120000, headless=True):
             
             # THIRD: Generate PDF
             page.pdf(path=str(pdf_path), format='A4', print_background=True)
-            pdf_status_parts = []
-            if rows_status_msg and 'Set to 100' in rows_status_msg:
-                pdf_status_parts.append(rows_status_msg)
-            pdf_status = "; ".join(pdf_status_parts) if pdf_status_parts else "PDF generated"
+            pdf_status = "PDF generated"
             
             # FOURTH: Export dataset via Export button
             download_success, download_status = download_dataset(page, dataset_path, timeout=60000)
