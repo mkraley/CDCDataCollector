@@ -194,6 +194,215 @@ def access_url(url, timeout=30):
         return False, f"Unexpected Error: {str(e)}", None, None
 
 
+def get_number_of_column_rows(page):
+    """
+    Get the total number of rows from the paginator legend (e.g., "1-15 of 125" -> 125).
+    
+    Args:
+        page: Playwright page object
+    
+    Returns:
+        int or None - total number of rows, or None if not found
+    """
+    read_total_js = """
+    () => {
+        try {
+            const fp = document.querySelector('forge-paginator');
+            if (!fp || !fp.shadowRoot) return null;
+            
+            const rangeLabel = fp.shadowRoot.querySelector('.range-label');
+            if (!rangeLabel) return null;
+            
+            let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
+            const slot = rangeLabel.querySelector('slot[name="range-label"]');
+            if (slot && slot.assignedNodes) {
+                const assigned = slot.assignedNodes();
+                if (assigned.length > 0) {
+                    rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
+                }
+            }
+            
+            const match = rangeText.match(/of\\s+(\\d+)/i);
+            return match ? parseInt(match[1]) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+    """
+    return page.evaluate(read_total_js)
+
+
+def show_all_column_rows(page, total_rows):
+    """
+    Set the rows per page dropdown to show all rows (or 100, whichever is appropriate).
+    If total_rows > 100, updates the "100" option to the actual number first.
+    
+    Args:
+        page: Playwright page object
+        total_rows: Total number of rows (int or None)
+    
+    Returns:
+        bool - True if successful, False otherwise
+    """
+    try:
+        if total_rows is not None:
+            print(f"  Total rows: {total_rows}")
+            target_page_size = total_rows if total_rows > 100 else 100
+            
+            set_rows_js = f"""
+            () => {{
+                try {{
+                    const fp = document.querySelector('forge-paginator');
+                    if (!fp) {{
+                        return {{ success: false, message: 'forge-paginator not found' }};
+                    }}
+                    
+                    const fs = fp.shadowRoot.querySelector('forge-select');
+                    if (!fs) {{
+                        return {{ success: false, message: 'forge-select not found' }};
+                    }}
+                    
+                    const targetSize = {target_page_size};
+                    
+                    // If target size > 100, update the "100" option to the actual number
+                    if (targetSize > 100) {{
+                        const option100 = fs.querySelector('forge-option[label="100"]');
+                        if (option100) {{
+                            option100.setAttribute('label', targetSize.toString());
+                            option100.textContent = targetSize.toString();
+                        }}
+                    }}
+                    
+                    // Set the value
+                    fs.value = targetSize.toString();
+                    fp.pageSize = targetSize;
+                    
+                    const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+                    fs.dispatchEvent(changeEvent);
+                    
+                    const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {{
+                        bubbles: true,
+                        cancelable: true,
+                        detail: {{
+                            type: 'page-size',
+                            pageSize: targetSize,
+                            pageIndex: fp.pageIndex || 0,
+                            offset: fp.offset || 0
+                        }}
+                    }});
+                    fp.dispatchEvent(paginatorChangeEvent);
+                    
+                    return {{ success: true, message: 'Set to ' + targetSize }};
+                }} catch (e) {{
+                    return {{ success: false, message: 'Error: ' + e.message }};
+                }}
+            }}
+            """
+            
+            rows_result = page.evaluate(set_rows_js)
+            
+            if rows_result and rows_result.get('success'):
+                print(f"  Set rows per page to {target_page_size}")
+                page.wait_for_timeout(2000)  # Wait for rows to load
+                return True
+            else:
+                error_msg = rows_result.get('message', 'Could not change rows per page') if rows_result else 'Dropdown not found'
+                print(f"  Note: {error_msg}")
+                return False
+        else:
+            print(f"  Note: Could not read total rows, defaulting to 100")
+            # Fallback to 100 if we can't read the total
+            set_rows_js = """
+            () => {
+                try {
+                    const fp = document.querySelector('forge-paginator');
+                    if (!fp) {
+                        return { success: false, message: 'forge-paginator not found' };
+                    }
+                    
+                    const fs = fp.shadowRoot.querySelector('forge-select');
+                    if (!fs) {
+                        return { success: false, message: 'forge-select not found' };
+                    }
+                    
+                    fs.value = '100';
+                    fp.pageSize = 100;
+                    
+                    const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+                    fs.dispatchEvent(changeEvent);
+                    
+                    const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
+                        bubbles: true,
+                        cancelable: true,
+                        detail: {
+                            type: 'page-size',
+                            pageSize: 100,
+                            pageIndex: fp.pageIndex || 0,
+                            offset: fp.offset || 0
+                        }
+                    });
+                    fp.dispatchEvent(paginatorChangeEvent);
+                    
+                    return { success: true, message: 'Set to 100' };
+                } catch (e) {
+                    return { success: false, message: 'Error: ' + e.message };
+                }
+            }
+            """
+            page.evaluate(set_rows_js)
+            page.wait_for_timeout(2000)
+            return True
+    except Exception as e:
+        print(f"  Note: Could not change rows per page dropdown: {e}")
+        return False
+
+
+def expand_read_more_links(page):
+    """
+    Find and click "Read more" links/buttons to expand content.
+    
+    Args:
+        page: Playwright page object
+    
+    Returns:
+        int - number of links clicked
+    """
+    expand_keywords = ['read more']
+    
+    expand_js = """
+    (keywords) => {
+        const clicked = new Set();
+        let count = 0;
+        const maxClicks = 100;
+        
+        function findAndClick(keyword) {
+            const allElements = document.querySelectorAll('forge-button.collapse-button');
+            for (const el of allElements) {
+                el.click();
+                count++;
+            }
+        }
+        
+        for (const keyword of keywords) {
+            if (count >= maxClicks) break;
+            findAndClick(keyword);
+        }
+        
+        return count;
+    }
+    """
+    
+    try:
+        clicked_count = page.evaluate(expand_js, expand_keywords)
+        if clicked_count > 0:
+            print(f"  Expanded {clicked_count} 'Read more' sections")
+            page.wait_for_timeout(1500)
+        return clicked_count
+    except Exception as e:
+        print(f"  Note: Could not expand 'Read more' links: {e}")
+        return 0
+
+
 def download_dataset(page, output_path, timeout=60000):
     """
     Download dataset by clicking Export button and then Download button in the dialog.
@@ -289,219 +498,139 @@ def download_dataset(page, output_path, timeout=60000):
         return False, f"Error downloading dataset: {str(e)[:100]}"
 
 
-def process_url(url, pdf_path, dataset_path, timeout=120000, headless=True):
+def get_source_data(row, url_source_col, title_source_col, office_source_col, agency_source_col):
     """
-    Process a URL in a single browser session: set rows per page, expand content, generate PDF, and export dataset.
+    Extract data from a source row.
+    
+    Args:
+        row: Pandas Series representing a single row from the source sheet
+        url_source_col: Column name for URL
+        title_source_col: Column name for title
+        office_source_col: Column name for office
+        agency_source_col: Column name for agency
+    
+    Returns:
+        Tuple of (url: str, title: str, office: str, agency: str)
+    """
+    url = str(row[url_source_col]).strip() if pd.notna(row[url_source_col]) else ""
+    title = str(row[title_source_col]).strip() if title_source_col and pd.notna(row.get(title_source_col)) else ""
+    office = str(row[office_source_col]).strip() if office_source_col and pd.notna(row.get(office_source_col)) else ""
+    agency = str(row[agency_source_col]).strip() if agency_source_col and pd.notna(row.get(agency_source_col)) else ""
+    return url, title, office, agency
+
+
+def create_data_folder(base_data_dir, title):
+    """
+    Create a data folder based on title (alias for create_title_folder for consistency).
+    
+    Args:
+        base_data_dir: Base directory for creating title folders
+        title: Title to use for folder name
+    
+    Returns:
+        Path object for the created folder, or None if creation failed
+    """
+    return create_title_folder(base_data_dir, title)
+
+
+def create_new_output_row(url, title, office, agency, files_path_str):
+    """
+    Create a new output row dictionary with the given data.
+    
+    Args:
+        url: URL string
+        title: Title string
+        office: Office string
+        agency: Agency string
+        files_path_str: Files path string (or None)
+    
+    Returns:
+        Dictionary representing the output row
+    """
+    return {
+        '7_original_distribution_url': url,
+        '4_title': title,
+        '5_agency': office,
+        '5_agency2': agency,
+        'Status': None,
+        'files_path': files_path_str
+    }
+
+
+def update_output_data(output_df, new_row, output_file):
+    """
+    Append a new row to the output DataFrame and save to file.
+    
+    Args:
+        output_df: DataFrame to append to
+        new_row: Dictionary representing the new row
+        output_file: Path to output Excel file
+    
+    Returns:
+        Updated output_df
+    """
+    output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+    
+    try:
+        output_df.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"  Saved to output file")
+    except Exception as e:
+        print(f"  ERROR: Could not save output file: {e}")
+        sys.exit(1)
+    
+    return output_df
+
+
+
+
+def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True):
+    """
+    Convert a source URL to PDF in a browser session.
+    Sets rows per page, expands content, and generates PDF.
     
     Args:
         url: URL to process
         pdf_path: Path object where PDF should be saved
-        dataset_path: Path object where dataset CSV should be saved
         timeout: Timeout in milliseconds (default: 120 seconds)
         headless: If False, run browser in visible mode for debugging (default: True)
     
     Returns:
-        Tuple of (pdf_success: bool, pdf_status: str, total_rows: int or None, 
-                 download_success: bool, download_status: str)
+        Tuple of (page: Playwright page object, browser: Playwright browser object, 
+                 pdf_status: str, total_rows: int or None)
+        Caller is responsible for closing the browser.
     """
+    playwright = None
+    browser = None
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
-            page = browser.new_page()
-            
-            page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            page.wait_for_timeout(500)
-            
-            # FIRST: Get actual number of rows and set rows per page accordingly (before expanding Read more)
-            total_rows = None
-            try:
-                # First, read the current total rows from the legend
-                read_total_js = """
-                () => {
-                    try {
-                        const fp = document.querySelector('forge-paginator');
-                        if (!fp || !fp.shadowRoot) return null;
-                        
-                        const rangeLabel = fp.shadowRoot.querySelector('.range-label');
-                        if (!rangeLabel) return null;
-                        
-                        let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
-                        const slot = rangeLabel.querySelector('slot[name="range-label"]');
-                        if (slot && slot.assignedNodes) {
-                            const assigned = slot.assignedNodes();
-                            if (assigned.length > 0) {
-                                rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
-                            }
-                        }
-                        
-                        const match = rangeText.match(/of\\s+(\\d+)/i);
-                        return match ? parseInt(match[1]) : null;
-                    } catch (e) {
-                        return null;
-                    }
-                }
-                """
-                
-                total_rows = page.evaluate(read_total_js)
-                
-                if total_rows is not None:
-                    print(f"  Total rows: {total_rows}")
-                    
-                    # Determine the target page size
-                    target_page_size = total_rows if total_rows > 100 else 100
-                    
-                    set_rows_js = f"""
-                    () => {{
-                        try {{
-                            const fp = document.querySelector('forge-paginator');
-                            if (!fp) {{
-                                return {{ success: false, message: 'forge-paginator not found', totalRows: null }};
-                            }}
-                            
-                            const fs = fp.shadowRoot.querySelector('forge-select');
-                            if (!fs) {{
-                                return {{ success: false, message: 'forge-select not found', totalRows: null }};
-                            }}
-                            
-                            const targetSize = {target_page_size};
-                            
-                            // If target size > 100, update the "100" option to the actual number
-                            if (targetSize > 100) {{
-                                const option100 = fs.querySelector('forge-option[label="100"]');
-                                if (option100) {{
-                                    option100.setAttribute('label', targetSize.toString());
-                                    option100.textContent = targetSize.toString();
-                                }}
-                            }}
-                            
-                            // Set the value
-                            fs.value = targetSize.toString();
-                            fp.pageSize = targetSize;
-                            
-                            const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
-                            fs.dispatchEvent(changeEvent);
-                            
-                            const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {{
-                                bubbles: true,
-                                cancelable: true,
-                                detail: {{
-                                    type: 'page-size',
-                                    pageSize: targetSize,
-                                    pageIndex: fp.pageIndex || 0,
-                                    offset: fp.offset || 0
-                                }}
-                            }});
-                            fp.dispatchEvent(paginatorChangeEvent);
-                            
-                            return {{ success: true, message: 'Set to ' + targetSize, totalRows: null }};
-                        }} catch (e) {{
-                            return {{ success: false, message: 'Error: ' + e.message, totalRows: null }};
-                        }}
-                    }}
-                    """
-                    
-                    rows_result = page.evaluate(set_rows_js)
-                    
-                    if rows_result and rows_result.get('success'):
-                        print(f"  Set rows per page to {target_page_size}")
-                        page.wait_for_timeout(2000)  # Wait for rows to load
-                    else:
-                        error_msg = rows_result.get('message', 'Could not change rows per page') if rows_result else 'Dropdown not found'
-                        print(f"  Note: {error_msg}")
-                else:
-                    print(f"  Note: Could not read total rows, defaulting to 100")
-                    # Fallback to 100 if we can't read the total
-                    set_rows_js = """
-                    () => {
-                        try {
-                            const fp = document.querySelector('forge-paginator');
-                            if (!fp) {
-                                return { success: false, message: 'forge-paginator not found', totalRows: null };
-                            }
-                            
-                            const fs = fp.shadowRoot.querySelector('forge-select');
-                            if (!fs) {
-                                return { success: false, message: 'forge-select not found', totalRows: null };
-                            }
-                            
-                            fs.value = '100';
-                            fp.pageSize = 100;
-                            
-                            const changeEvent = new Event('change', { bubbles: true, cancelable: true });
-                            fs.dispatchEvent(changeEvent);
-                            
-                            const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
-                                bubbles: true,
-                                cancelable: true,
-                                detail: {
-                                    type: 'page-size',
-                                    pageSize: 100,
-                                    pageIndex: fp.pageIndex || 0,
-                                    offset: fp.offset || 0
-                                }
-                            });
-                            fp.dispatchEvent(paginatorChangeEvent);
-                            
-                            return { success: true, message: 'Set to 100', totalRows: null };
-                        } catch (e) {
-                            return { success: false, message: 'Error: ' + e.message, totalRows: null };
-                        }
-                    }
-                    """
-                    page.evaluate(set_rows_js)
-                    page.wait_for_timeout(2000)
-            except Exception as e:
-                print(f"  Note: Could not change rows per page dropdown: {e}")
-                total_rows = None
-            
-            # SECOND: Find and click "Read more" links/buttons to expand content (now that all rows are visible)
-            expand_keywords = ['read more']
-            
-            expand_js = """
-            (keywords) => {
-                const clicked = new Set();
-                let count = 0;
-                const maxClicks = 100;
-                
-                function findAndClick(keyword) {
-                    const allElements = document.querySelectorAll('forge-button.collapse-button');
-                    for (const el of allElements) {
-                        el.click();
-                        count++;
-                    }
-                }
-                
-                for (const keyword of keywords) {
-                    if (count >= maxClicks) break;
-                    findAndClick(keyword);
-                }
-                
-                return count;
-            }
-            """
-            
-            try:
-                clicked_count = page.evaluate(expand_js, expand_keywords)
-                if clicked_count > 0:
-                    print(f"  Expanded {clicked_count} 'Read more' sections")
-                    page.wait_for_timeout(1500)
-            except Exception as e:
-                print(f"  Note: Could not expand 'Read more' links: {e}")
-            
-            # THIRD: Generate PDF
-            page.pdf(path=str(pdf_path), format='A4', print_background=True)
-            pdf_status = "PDF generated"
-            
-            # FOURTH: Export dataset via Export button
-            download_success, download_status = download_dataset(page, dataset_path, timeout=60000)
-            
-            browser.close()
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
+        page = browser.new_page()
         
-        return True, pdf_status, total_rows, download_success, download_status
+        page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+        page.wait_for_timeout(500)
+        
+        # Get number of column rows
+        total_rows = get_number_of_column_rows(page)
+        
+        # Show all column rows (set dropdown)
+        show_all_column_rows(page, total_rows)
+        
+        # Expand read more links
+        expand_read_more_links(page)
+        
+        # Generate PDF
+        page.pdf(path=str(pdf_path), format='A4', print_background=True)
+        pdf_status = "PDF generated"
+        
+        return page, browser, playwright, pdf_status, total_rows
     except Exception as e:
-        error_msg = f"ERROR: Could not process URL: {e}"
+        if browser:
+            browser.close()
+        if playwright:
+            playwright.stop()
+        error_msg = f"ERROR: Could not convert source to PDF: {e}"
         print(f"  {error_msg}")
-        return False, error_msg, None, False, "Not attempted"
+        raise Exception(error_msg)
 
 
 def process_row(row, url_source_col, title_source_col, office_source_col, agency_source_col,
@@ -524,96 +653,80 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
     Returns:
         Updated output_df
     """
-    # Extract data from source row
-    url = str(row[url_source_col]).strip() if pd.notna(row[url_source_col]) else ""
-    title = str(row[title_source_col]).strip() if title_source_col and pd.notna(row.get(title_source_col)) else ""
-    office = str(row[office_source_col]).strip() if office_source_col and pd.notna(row.get(office_source_col)) else ""
-    agency = str(row[agency_source_col]).strip() if agency_source_col and pd.notna(row.get(agency_source_col)) else ""
+    # Get source data
+    url, title, office, agency = get_source_data(row, url_source_col, title_source_col, office_source_col, agency_source_col)
     
     print(f"  URL: {url}")
     print(f"  Title: {title}")
     
-    # Create folder based on title
-    folder_path = None
-    files_path_str = None
-    if title:
-        folder_path = create_title_folder(base_data_dir, title)
-        if folder_path:
-            files_path_str = str(folder_path)
-            print(f"  Created folder: {files_path_str}")
-        else:
-            print(f"  WARNING: Could not create folder for title")
-    else:
-        print(f"  WARNING: No title available, skipping folder creation")
+    # Create data folder
+    folder_path = create_data_folder(base_data_dir, title)
+    if not folder_path:
+        print(f"  ERROR: Could not create folder for title")
+        sys.exit(1)
     
-    # Create new row for output
-    new_row = {
-        '7_original_distribution_url': url,
-        '4_title': title,
-        '5_agency': office,
-        '5_agency2': agency,
-        'Status': None,
-        'files_path': files_path_str
-    }
+    files_path_str = str(folder_path)
+    print(f"  Created folder: {files_path_str}")
     
-    # Try to access the URL and convert to PDF
-    if url and url.startswith('http'):
-        print(f"  Attempting to access URL...")
-        success, status_msg, status_code, html_content = access_url(url)
-        base_status = status_msg
-        if success:
-            print(f"  ✓ Status: {status_msg}")
-            
-            # Convert URL to PDF and save to working folder
-            if folder_path:
-                pdf_filename = sanitize_folder_name(title, max_length=100) + ".pdf"
-                pdf_path = folder_path / pdf_filename
-                
-                print(f"  Processing URL (PDF + Export)...")
-                
-                # Export dataset
-                dataset_filename = sanitize_folder_name(title, max_length=80) + ".csv"
-                dataset_path = folder_path / dataset_filename
-                
-                pdf_success, pdf_status, total_rows, download_success, download_status = process_url(
-                    url, pdf_path, dataset_path, headless=headless
-                )
-                
-                if pdf_success:
-                    print(f"  ✓ PDF saved: {pdf_path}")
-                else:
-                    print(f"  ✗ Failed to save PDF")
-                
-                if download_success:
-                    print(f"  ✓ {download_status}")
-                elif download_status != "Not attempted":
-                    print(f"  Note: {download_status}")
-                
-                # Combine status messages
-                status_parts = [base_status]
-                if pdf_status:
-                    status_parts.append(pdf_status)
-                new_row['Status'] = "; ".join(status_parts)
-            else:
-                print(f"  ✗ No folder available for PDF")
-                new_row['Status'] = base_status
-        else:
-            print(f"  ✗ Status: {status_msg}")
-            new_row['Status'] = status_msg
-    else:
+    # Create new output row
+    new_row = create_new_output_row(url, title, office, agency, files_path_str)
+    
+    # Validate URL
+    if not url or not url.startswith('http'):
         new_row['Status'] = "Invalid URL"
         print(f"  ✗ Status: Invalid URL")
+        output_df = update_output_data(output_df, new_row, output_file)
+        return output_df
     
-    # Append new row to output DataFrame
-    output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+    # Access URL
+    print(f"  Attempting to access URL...")
+    success, status_msg, status_code, html_content = access_url(url)
+    if not success:
+        new_row['Status'] = status_msg
+        print(f"  ✗ Status: {status_msg}")
+        output_df = update_output_data(output_df, new_row, output_file)
+        return output_df
     
-    # Save output file after each row
+    print(f"  ✓ Status: {status_msg}")
+    base_status = status_msg
+    
+    # Prepare file paths
+    pdf_filename = sanitize_folder_name(title, max_length=100) + ".pdf"
+    pdf_path = folder_path / pdf_filename
+    
+    dataset_filename = sanitize_folder_name(title, max_length=80) + ".csv"
+    dataset_path = folder_path / dataset_filename
+    
+    print(f"  Processing URL (PDF + Export)...")
+    
+    # Convert source to PDF
+    browser = None
+    playwright = None
     try:
-        output_df.to_excel(output_file, index=False, engine='openpyxl')
-        print(f"  Saved to output file")
+        page, browser, playwright, pdf_status, total_rows = convert_source_to_pdf(url, pdf_path, headless=headless)
+        print(f"  ✓ PDF saved: {pdf_path}")
+        
+        # Download dataset
+        download_success, download_status = download_dataset(page, dataset_path, timeout=60000)
+        if download_success:
+            print(f"  ✓ {download_status}")
+        else:
+            print(f"  Note: {download_status}")
+        
+        # Combine status messages
+        status_parts = [base_status, pdf_status]
+        new_row['Status'] = "; ".join(status_parts)
     except Exception as e:
-        print(f"  ERROR: Could not save output file: {e}")
-        sys.exit(1)
+        new_row['Status'] = f"{base_status}; {str(e)}"
+        print(f"  ✗ Error: {e}")
+    finally:
+        if browser:
+            browser.close()
+        if playwright:
+            playwright.stop()
+    
+    # Update output data (append row and save)
+    output_df = update_output_data(output_df, new_row, output_file)
     
     return output_df
 
@@ -683,7 +796,7 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
     
     # Process each row
     for idx, (_, row) in enumerate(rows_to_process.iterrows(), start=start_row):
-        print(f"\n[{idx+1}/{len(rows_to_process)}] Processing row {idx}...")
+        print(f"\n[{idx}/{len(rows_to_process)}] Processing row {idx}...")
         output_df = process_row(
             row, url_source_col, title_source_col, office_source_col, agency_source_col,
             base_data_dir, output_df, output_file, output_columns, headless=headless
