@@ -176,8 +176,21 @@ def open_workspace_and_click_create_project(headless=False):
     browser = None
     try:
         playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
-        page = browser.new_page()
+        # browser = playwright.chromium.launch(headless=headless, slow_mo=500 if not headless else 0)
+        browser = playwright.chromium.launch(headless=False, slow_mo=500 if not headless else 0,         
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+            ])
+
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='America/New_York',
+        )
+        page = context.new_page()
         
         # Sign in first
         signin_success, signin_message = sign_in(page)
