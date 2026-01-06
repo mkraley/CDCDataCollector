@@ -206,32 +206,37 @@ def get_number_of_column_rows(page):
     Returns:
         int or None - total number of rows, or None if not found
     """
-    read_total_js = """
-    () => {
-        try {
-            const fp = document.querySelector('forge-paginator');
-            if (!fp || !fp.shadowRoot) return null;
-            
-            const rangeLabel = fp.shadowRoot.querySelector('.range-label');
-            if (!rangeLabel) return null;
-            
-            let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
-            const slot = rangeLabel.querySelector('slot[name="range-label"]');
-            if (slot && slot.assignedNodes) {
-                const assigned = slot.assignedNodes();
-                if (assigned.length > 0) {
-                    rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
+    try:
+        # Playwright can pierce shadow DOM with locator, but for complex shadow DOM
+        # operations like accessing slots, we use a minimal evaluate call
+        result = page.evaluate("""
+            () => {
+                try {
+                    const fp = document.querySelector('forge-paginator');
+                    if (!fp || !fp.shadowRoot) return null;
+                    
+                    const rangeLabel = fp.shadowRoot.querySelector('.range-label');
+                    if (!rangeLabel) return null;
+                    
+                    let rangeText = (rangeLabel.textContent || rangeLabel.innerText || '').trim();
+                    const slot = rangeLabel.querySelector('slot[name="range-label"]');
+                    if (slot && slot.assignedNodes) {
+                        const assigned = slot.assignedNodes();
+                        if (assigned.length > 0) {
+                            rangeText = assigned.map(n => n.textContent || '').join(' ').trim();
+                        }
+                    }
+                    
+                    const match = rangeText.match(/of\\s+(\\d+)/i);
+                    return match ? parseInt(match[1]) : null;
+                } catch (e) {
+                    return null;
                 }
             }
-            
-            const match = rangeText.match(/of\\s+(\\d+)/i);
-            return match ? parseInt(match[1]) : null;
-        } catch (e) {
-            return null;
-        }
-    }
-    """
-    return page.evaluate(read_total_js)
+        """)
+        return result
+    except Exception:
+        return None
 
 
 def format_file_size(size_bytes):
@@ -267,40 +272,36 @@ def get_dataset_metadata(page):
     Returns:
         Tuple of (rows: str or None, columns: str or None)
     """
-    metadata_js = """
-    () => {
-        try {
-            const metadataRow = document.querySelector('dl.metadata-row');
-            if (!metadataRow) return { rows: null, columns: null };
+    try:
+        metadata_row = page.locator('dl.metadata-row')
+        if metadata_row.count() == 0:
+            return None, None
+        
+        rows = None
+        columns = None
+        
+        pairs = metadata_row.locator('.metadata-pair')
+        pair_count = pairs.count()
+        
+        for i in range(pair_count):
+            pair = pairs.nth(i)
+            key_locator = pair.locator('.metadata-pair-key')
+            value_locator = pair.locator('.metadata-pair-value')
             
-            const pairs = metadataRow.querySelectorAll('.metadata-pair');
-            let rows = null;
-            let columns = null;
+            if key_locator.count() == 0 or value_locator.count() == 0:
+                continue
             
-            for (const pair of pairs) {
-                const key = pair.querySelector('.metadata-pair-key');
-                const value = pair.querySelector('.metadata-pair-value');
-                
-                if (!key || !value) continue;
-                
-                const keyText = (key.textContent || key.innerText || '').trim();
-                const valueText = (value.textContent || value.innerText || '').trim();
-                
-                if (keyText === 'Rows') {
-                    rows = valueText;
-                } else if (keyText === 'Columns') {
-                    columns = valueText;
-                }
-            }
+            key_text = key_locator.first.inner_text().strip()
+            value_text = value_locator.first.inner_text().strip()
             
-            return { rows: rows, columns: columns };
-        } catch (e) {
-            return { rows: null, columns: null };
-        }
-    }
-    """
-    result = page.evaluate(metadata_js)
-    return result.get('rows'), result.get('columns')
+            if key_text == 'Rows':
+                rows = value_text
+            elif key_text == 'Columns':
+                columns = value_text
+        
+        return rows, columns
+    except Exception:
+        return None, None
 
 
 def get_description(page):
@@ -313,21 +314,14 @@ def get_description(page):
     Returns:
         Description text as string, or None if not found
     """
-    description_js = """
-    () => {
-        try {
-            const descriptionSection = document.querySelector('div.description-section');
-            if (!descriptionSection) return null;
-            
-            // Get all text content from the description section
-            const text = (descriptionSection.textContent || descriptionSection.innerText || '').trim();
-            return text || null;
-        } catch (e) {
-            return null;
-        }
-    }
-    """
-    return page.evaluate(description_js)
+    try:
+        description_locator = page.locator('div.description-section')
+        if description_locator.count() == 0:
+            return None
+        text = description_locator.first.inner_text()
+        return text.strip() if text else None
+    except Exception:
+        return None
 
 
 def get_keywords(page):
@@ -342,42 +336,39 @@ def get_keywords(page):
     Returns:
         Keywords text as string, or None if not found
     """
-    keywords_js = """
-    () => {
-        try {
-            // Find all metadata-table divs
-            const metadataTables = document.querySelectorAll('div.metadata-table');
+    try:
+        metadata_tables = page.locator('div.metadata-table')
+        table_count = metadata_tables.count()
+        
+        for i in range(table_count):
+            table = metadata_tables.nth(i)
+            # Check if it has an immediate child h3 with text "Topics"
+            h3 = table.locator('> h3').first
+            if h3.count() == 0:
+                continue
             
-            for (const table of metadataTables) {
-                // Check if it has an immediate child h3 with text "Topics"
-                const h3 = table.querySelector(':scope > h3');
-                if (!h3) continue;
-                
-                const h3Text = (h3.textContent || h3.innerText || '').trim();
-                if (h3Text !== 'Topics') continue;
-                
-                // Find tr whose first td has text "Tags"
-                const rows = table.querySelectorAll('tr');
-                for (const row of rows) {
-                    const tds = row.querySelectorAll('td');
-                    if (tds.length < 2) continue;
-                    
-                    const firstTdText = (tds[0].textContent || tds[0].innerText || '').trim();
-                    if (firstTdText === 'Tags') {
-                        // Get textContent of the 2nd td
-                        const keywords = (tds[1].textContent || tds[1].innerText || '').trim();
-                        return keywords || null;
-                    }
-                }
-            }
+            h3_text = h3.inner_text().strip()
+            if h3_text != 'Topics':
+                continue
             
-            return null;
-        } catch (e) {
-            return null;
-        }
-    }
-    """
-    return page.evaluate(keywords_js)
+            # Find tr whose first td has text "Tags"
+            rows = table.locator('tr')
+            row_count = rows.count()
+            
+            for j in range(row_count):
+                row = rows.nth(j)
+                tds = row.locator('td')
+                if tds.count() < 2:
+                    continue
+                
+                first_td_text = tds.nth(0).inner_text().strip()
+                if first_td_text == 'Tags':
+                    keywords = tds.nth(1).inner_text().strip()
+                    return keywords if keywords else None
+        
+        return None
+    except Exception:
+        return None
 
 
 def show_all_column_rows(page, total_rows, verbose=False):
@@ -399,57 +390,56 @@ def show_all_column_rows(page, total_rows, verbose=False):
                 print(f"  Total rows: {total_rows}")
             target_page_size = total_rows if total_rows > 100 else 100
             
-            set_rows_js = f"""
-            () => {{
-                try {{
-                    const fp = document.querySelector('forge-paginator');
-                    if (!fp) {{
-                        return {{ success: false, message: 'forge-paginator not found' }};
-                    }}
-                    
-                    const fs = fp.shadowRoot.querySelector('forge-select');
-                    if (!fs) {{
-                        return {{ success: false, message: 'forge-select not found' }};
-                    }}
-                    
-                    const targetSize = {target_page_size};
-                    
-                    // If target size > 100, update the "100" option to the actual number
-                    if (targetSize > 100) {{
-                        const option100 = fs.querySelector('forge-option[label="100"]');
-                        if (option100) {{
-                            option100.setAttribute('label', targetSize.toString());
-                            option100.textContent = targetSize.toString();
+            # For shadow DOM manipulation, we use evaluate with minimal JavaScript
+            rows_result = page.evaluate(f"""
+                () => {{
+                    try {{
+                        const fp = document.querySelector('forge-paginator');
+                        if (!fp) {{
+                            return {{ success: false, message: 'forge-paginator not found' }};
                         }}
-                    }}
-                    
-                    // Set the value
-                    fs.value = targetSize.toString();
-                    fp.pageSize = targetSize;
-                    
-                    const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
-                    fs.dispatchEvent(changeEvent);
-                    
-                    const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {{
-                        bubbles: true,
-                        cancelable: true,
-                        detail: {{
-                            type: 'page-size',
-                            pageSize: targetSize,
-                            pageIndex: fp.pageIndex || 0,
-                            offset: fp.offset || 0
+                        
+                        const fs = fp.shadowRoot.querySelector('forge-select');
+                        if (!fs) {{
+                            return {{ success: false, message: 'forge-select not found' }};
                         }}
-                    }});
-                    fp.dispatchEvent(paginatorChangeEvent);
-                    
-                    return {{ success: true, message: 'Set to ' + targetSize }};
-                }} catch (e) {{
-                    return {{ success: false, message: 'Error: ' + e.message }};
+                        
+                        const targetSize = {target_page_size};
+                        
+                        // If target size > 100, update the "100" option to the actual number
+                        if (targetSize > 100) {{
+                            const option100 = fs.querySelector('forge-option[label="100"]');
+                            if (option100) {{
+                                option100.setAttribute('label', targetSize.toString());
+                                option100.textContent = targetSize.toString();
+                            }}
+                        }}
+                        
+                        // Set the value
+                        fs.value = targetSize.toString();
+                        fp.pageSize = targetSize;
+                        
+                        const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+                        fs.dispatchEvent(changeEvent);
+                        
+                        const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {{
+                            bubbles: true,
+                            cancelable: true,
+                            detail: {{
+                                type: 'page-size',
+                                pageSize: targetSize,
+                                pageIndex: fp.pageIndex || 0,
+                                offset: fp.offset || 0
+                            }}
+                        }});
+                        fp.dispatchEvent(paginatorChangeEvent);
+                        
+                        return {{ success: true, message: 'Set to ' + targetSize }};
+                    }} catch (e) {{
+                        return {{ success: false, message: 'Error: ' + e.message }};
+                    }}
                 }}
-            }}
-            """
-            
-            rows_result = page.evaluate(set_rows_js)
+            """)
             
             if rows_result and rows_result.get('success'):
                 if verbose:
@@ -465,44 +455,43 @@ def show_all_column_rows(page, total_rows, verbose=False):
             if verbose:
                 print(f"  Note: Could not read total rows, defaulting to 100")
             # Fallback to 100 if we can't read the total
-            set_rows_js = """
-            () => {
-                try {
-                    const fp = document.querySelector('forge-paginator');
-                    if (!fp) {
-                        return { success: false, message: 'forge-paginator not found' };
-                    }
-                    
-                    const fs = fp.shadowRoot.querySelector('forge-select');
-                    if (!fs) {
-                        return { success: false, message: 'forge-select not found' };
-                    }
-                    
-                    fs.value = '100';
-                    fp.pageSize = 100;
-                    
-                    const changeEvent = new Event('change', { bubbles: true, cancelable: true });
-                    fs.dispatchEvent(changeEvent);
-                    
-                    const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
-                        bubbles: true,
-                        cancelable: true,
-                        detail: {
-                            type: 'page-size',
-                            pageSize: 100,
-                            pageIndex: fp.pageIndex || 0,
-                            offset: fp.offset || 0
+            rows_result = page.evaluate("""
+                () => {
+                    try {
+                        const fp = document.querySelector('forge-paginator');
+                        if (!fp) {
+                            return { success: false, message: 'forge-paginator not found' };
                         }
-                    });
-                    fp.dispatchEvent(paginatorChangeEvent);
-                    
-                    return { success: true, message: 'Set to 100' };
-                } catch (e) {
-                    return { success: false, message: 'Error: ' + e.message };
+                        
+                        const fs = fp.shadowRoot.querySelector('forge-select');
+                        if (!fs) {
+                            return { success: false, message: 'forge-select not found' };
+                        }
+                        
+                        fs.value = '100';
+                        fp.pageSize = 100;
+                        
+                        const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+                        fs.dispatchEvent(changeEvent);
+                        
+                        const paginatorChangeEvent = new CustomEvent('forge-paginator-change', {
+                            bubbles: true,
+                            cancelable: true,
+                            detail: {
+                                type: 'page-size',
+                                pageSize: 100,
+                                pageIndex: fp.pageIndex || 0,
+                                offset: fp.offset || 0
+                            }
+                        });
+                        fp.dispatchEvent(paginatorChangeEvent);
+                        
+                        return { success: true, message: 'Set to 100' };
+                    } catch (e) {
+                        return { success: false, message: 'Error: ' + e.message };
+                    }
                 }
-            }
-            """
-            page.evaluate(set_rows_js)
+            """)
             page.wait_for_timeout(2000)
             return True
     except Exception as e:
@@ -522,33 +511,21 @@ def expand_read_more_links(page, verbose=False):
     Returns:
         int - number of links clicked
     """
-    expand_keywords = ['read more']
-    
-    expand_js = """
-    (keywords) => {
-        const clicked = new Set();
-        let count = 0;
-        const maxClicks = 100;
-        
-        function findAndClick(keyword) {
-            const allElements = document.querySelectorAll('forge-button.collapse-button');
-            for (const el of allElements) {
-                el.click();
-                count++;
-            }
-        }
-        
-        for (const keyword of keywords) {
-            if (count >= maxClicks) break;
-            findAndClick(keyword);
-        }
-        
-        return count;
-    }
-    """
-    
     try:
-        clicked_count = page.evaluate(expand_js, expand_keywords)
+        buttons = page.locator('forge-button.collapse-button')
+        button_count = buttons.count()
+        
+        max_clicks = min(button_count, 100)
+        clicked_count = 0
+        
+        for i in range(max_clicks):
+            try:
+                buttons.nth(i).click(timeout=1000)
+                clicked_count += 1
+            except Exception:
+                # Button might not be clickable, continue
+                continue
+        
         if clicked_count > 0:
             if verbose:
                 print(f"  Expanded {clicked_count} 'Read more' sections")
@@ -574,74 +551,78 @@ def download_dataset(page, output_path, timeout=60000):
         Tuple of (success: bool, status_message: str)
     """
     try:
-        # Find and click Export button first
-        export_clicked = page.evaluate("""
-            () => {
-                const exportButtons = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(el => {
-                    const text = (el.textContent || el.innerText || '').trim().toLowerCase();
-                    return text.includes('export') && text.length < 50;
-                });
-                
-                if (exportButtons.length === 0) {
-                    return { success: false, message: 'Export button not found' };
-                }
-                
-                try {
-                    exportButtons[0].scrollIntoView({ behavior: 'auto', block: 'center' });
-                    exportButtons[0].click();
-                    return { success: true, message: 'Export button clicked' };
-                } catch (e) {
-                    return { success: false, message: 'Could not click Export button: ' + e.message };
-                }
-            }
-        """)
+        # Find and click Export button using Playwright Python API
+        # Get all potential export buttons and filter by text in Python
+        all_buttons = page.locator('button, a, [role="button"]')
+        button_count = all_buttons.count()
+        export_button = None
         
-        if not export_clicked.get('success'):
-            return False, export_clicked.get('message', 'Could not find Export button')
+        for i in range(button_count):
+            try:
+                button = all_buttons.nth(i)
+                text = button.inner_text().strip().lower()
+                if 'export' in text and len(text) < 50:
+                    export_button = button
+                    break
+            except Exception:
+                continue
+        
+        if export_button is None:
+            return False, 'Export button not found'
+        
+        try:
+            export_button.scroll_into_view_if_needed()
+            export_button.click()
+        except Exception as e:
+            return False, f'Could not click Export button: {str(e)}'
         
         # Wait for dialog to appear
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1000)
         
         # Set up download listener before clicking Download
         with page.expect_download(timeout=timeout) as download_info:
             # Find and click Download button in the dialog - look for exact text "Download"
-            download_clicked = page.evaluate("""
-                () => {
-                    // Try to find Download button with exact label "Download"
-                    let downloadButtons = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(el => {
-                        const text = (el.textContent || el.innerText || '').trim();
-                        return text === 'Download';
-                    });
-                    
-                    // If not found, try looking in dialogs/modals
-                    if (downloadButtons.length === 0) {
-                        const dialogs = document.querySelectorAll('dialog, [role="dialog"], .modal, [class*="dialog"]');
-                        for (const dialog of dialogs) {
-                            const buttons = Array.from(dialog.querySelectorAll('button, a, [role="button"]'));
-                            downloadButtons = buttons.filter(el => {
-                                const text = (el.textContent || el.innerText || '').trim();
-                                return text === 'Download';
-                            });
-                            if (downloadButtons.length > 0) break;
-                        }
-                    }
-                    
-                    if (downloadButtons.length === 0) {
-                        return { success: false, message: 'Download button with exact label "Download" not found in dialog' };
-                    }
-                    
-                    try {
-                        downloadButtons[0].scrollIntoView({ behavior: 'auto', block: 'center' });
-                        downloadButtons[0].click();
-                        return { success: true, message: 'Download button clicked' };
-                    } catch (e) {
-                        return { success: false, message: 'Could not click Download button: ' + e.message };
-                    }
-                }
-            """)
+            # First try all buttons
+            all_buttons = page.locator('button, a, [role="button"]')
+            button_count = all_buttons.count()
+            download_button = None
             
-            if not download_clicked.get('success'):
-                return False, download_clicked.get('message', 'Could not find Download button')
+            for i in range(button_count):
+                try:
+                    button = all_buttons.nth(i)
+                    if button.inner_text().strip() == 'Download':
+                        download_button = button
+                        break
+                except Exception:
+                    continue
+            
+            # If not found, try looking in dialogs/modals
+            if download_button is None:
+                dialogs = page.locator('dialog, [role="dialog"], .modal, [class*="dialog"]')
+                dialog_count = dialogs.count()
+                for i in range(dialog_count):
+                    dialog = dialogs.nth(i)
+                    dialog_buttons = dialog.locator('button, a, [role="button"]')
+                    dialog_button_count = dialog_buttons.count()
+                    for j in range(dialog_button_count):
+                        try:
+                            button = dialog_buttons.nth(j)
+                            if button.inner_text().strip() == 'Download':
+                                download_button = button
+                                break
+                        except Exception:
+                            continue
+                    if download_button is not None:
+                        break
+            
+            if download_button is None:
+                return False, 'Download button with exact label "Download" not found in dialog'
+            
+            try:
+                download_button.scroll_into_view_if_needed()
+                download_button.click()
+            except Exception as e:
+                return False, f'Could not click Download button: {str(e)}'
         
         # Wait for download to complete and save the file
         download = download_info.value
