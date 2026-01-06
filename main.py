@@ -654,6 +654,11 @@ def get_source_data(row, url_source_col, title_source_col, office_source_col, ag
     title = str(row[title_source_col]).strip() if title_source_col and pd.notna(row.get(title_source_col)) else ""
     office = str(row[office_source_col]).strip() if office_source_col and pd.notna(row.get(office_source_col)) else ""
     agency = str(row[agency_source_col]).strip() if agency_source_col and pd.notna(row.get(agency_source_col)) else ""
+    
+    # Expand "CDC" to full agency name
+    if agency and agency.upper() == "CDC":
+        agency = "United States Department of Health and Human Services. Centers for Disease Control and Prevention"
+    
     return url, title, office, agency
 
 
@@ -751,7 +756,7 @@ def update_output_data(output_df, new_row, output_file, verbose=False):
             print(f"  Added new row to output file")
     
     try:
-        output_df.to_excel(output_file, index=False, engine='openpyxl')
+        output_df.to_csv(output_file, index=False, encoding='utf-8-sig')
         if verbose:
             print(f"  Saved to output file")
     except Exception as e:
@@ -1031,7 +1036,7 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
     output_path = Path(output_file)
     if output_path.exists():
         try:
-            output_df = pd.read_excel(output_file)
+            output_df = pd.read_csv(output_file, encoding='utf-8-sig')
             # Ensure all required columns exist
             for col in output_columns:
                 if col not in output_df.columns:
@@ -1077,8 +1082,8 @@ def main():
     parser.add_argument(
         '--output',
         type=str,
-        default=r'C:\Documents\DataRescue\CDCCollectedData.xlsx',
-        help='Path to output Excel file'
+        default=r'C:\Documents\DataRescue\CDCCollectedData.csv',
+        help='Path to output CSV file'
     )
     parser.add_argument(
         '--start-row',
