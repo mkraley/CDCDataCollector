@@ -1053,9 +1053,9 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
         print("DEBUG MODE: Browser will be visible")
     
     # Process each row
-    for idx, (_, row) in enumerate(rows_to_process.iterrows(), start=start_row):
+    for idx, (i, row) in enumerate(rows_to_process.iterrows(), start=start_row):
         if verbose:
-            print(f"\n[{idx}/{len(rows_to_process)}] Processing row {idx}...")
+            print(f"\n[{i+1}/{len(rows_to_process)}] Processing row {idx}...")
         output_df = process_row(
             row, url_source_col, title_source_col, office_source_col, agency_source_col,
             base_data_dir, output_df, output_file, output_columns, headless=headless,
