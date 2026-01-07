@@ -49,6 +49,11 @@ htmlcov/
 .env
 .env.local
 
+# Google Service Account credentials
+*credentials*.json
+google-credentials.json
+service-account*.json
+
 # Logs
 *.log
 

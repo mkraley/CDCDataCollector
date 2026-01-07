@@ -30,6 +30,16 @@ import os
 import re
 import argparse
 import pandas as pd
+from datetime import datetime
+
+# Google Sheets API imports (optional - only used if Google Sheets is configured)
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    GOOGLE_SHEETS_AVAILABLE = True
+except ImportError:
+    GOOGLE_SHEETS_AVAILABLE = False
 
 
 #########################################################
@@ -81,6 +91,21 @@ Examples:
     
     parser.add_argument('--verbose', action='store_true',
                         help='Enable verbose logging (default: one line per asset with summary)')
+    
+    parser.add_argument('--publish-mode', choices=['default', 'no-publish', 'only-publish'], default='default',
+                        help='Publishing mode: default (run all steps including publish), no-publish (skip publishing), only-publish (only publish, skip form-filling)')
+    
+    parser.add_argument('--google-sheet-id', default='1OYLn6NBWStOgPUTJfYpU0y0g4uY7roIPP4qC2YztgWY',
+                        help='Google Sheet ID (from the URL: https://docs.google.com/spreadsheets/d/SHEET_ID/edit). Default: CDC Data Inventories sheet')
+    
+    parser.add_argument('--google-credentials', default=None,
+                        help='Path to Google service account credentials JSON file (required for Google Sheets updates, even if sheet is publicly editable)')
+    
+    parser.add_argument('--google-sheet-name', default='CDC',
+                        help='Name of the worksheet/tab to update (default: CDC)')
+    
+    parser.add_argument('--google-username', default='mkraley',
+                        help='Username to write in the "Claimed" column (default: mkraley)')
     
     return parser.parse_args()
 
@@ -408,6 +433,652 @@ def verbose_print(message, verbose=False):
         print(message)
 
 
+def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
+    """
+    Fill in all project forms with data from CSV.
+    
+    Args:
+        mydriver: WebDriver instance
+        datadict: Dictionary containing CSV row data
+        args: Parsed command-line arguments
+        row_errors: List to append errors to
+        row_warnings: List to append warnings to
+    
+    Returns:
+        workspace_id: Extracted workspace ID or None
+    """
+    workspace_id = None
+    
+    # Normal mode: create project and fill forms
+    new_project_btn = WebDriverWait(mydriver, 360).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn > span:nth-child(3)"))) # .btn > span:nth-child(3)
+    verbose_print("button found", args.verbose)
+    wait_for_obscuring_elements(mydriver)
+    new_project_btn.click()
+
+    verbose_print(f"Processing row, Title: {datadict['4_title']}\n", args.verbose)
+
+
+    # --- Title
+
+    # <input type="text" class="form-control" name="title" id="title" value="" data-reactid=".2.0.0.1.2.0.$0.$0.$0.$displayPropKey2.0.2.0">
+    project_title_form = WebDriverWait(mydriver, 10).until(EC.presence_of_element_located((By.ID, "title")))
+    # title with pre-title (if existent):
+    pojecttitle = datadict["4_title"] if len(datadict["4_pre_title"]) == 0 else datadict["4_pre_title"] + " " + datadict["4_title"]
+    project_title_form.send_keys(pojecttitle)
+    # .save-project
+    project_title_apply = WebDriverWait(mydriver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".save-project")))
+    verbose_print("project_title_apply - found", args.verbose)
+    project_title_apply.click()
+    # <a role="button" class="btn btn-primary" href="workspace?goToPath=/datalumos/239181&amp;goToLevel=project" data-reactid=".2.0.0.1.2.1.0.0.0">Continue To Project Workspace</a>
+    #   CSS-selector: a.btn-primary
+    project_title_apply2 = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.LINK_TEXT, "Continue To Project Workspace")))
+    verbose_print("Continue To Project Workspace - found", args.verbose)
+    project_title_apply2.click()
+    
+    # Wait for navigation to complete
+    wait_for_obscuring_elements(mydriver)
+    sleep(1)
+    
+    # Extract workspace ID from current URL after navigating to workspace
+    current_url = mydriver.current_url
+    # Look for /datalumos/ followed by digits in the URL
+    match = re.search(r'/datalumos/(\d+)', current_url)
+    if match:
+        workspace_id = match.group(1)
+        verbose_print(f"✓ Workspace ID: {workspace_id} (from URL: {current_url})", args.verbose)
+    else:
+        warning_msg = f"Could not extract workspace ID from URL: {current_url}"
+        row_warnings.append(warning_msg)
+        verbose_print(f"⚠ {warning_msg}", args.verbose)
+
+
+    # --- expand everything
+
+    # collapse all: <span data-reactid=".0.3.1.1.0.1.2.0.1.0.1.1"> Collapse All</span>
+    #   css-selector: #expand-init > span:nth-child(2)
+    collapse_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#expand-init > span:nth-child(2)")))
+    wait_for_obscuring_elements(mydriver)
+    collapse_btn.click()
+    sleep(2)
+    # expand all: <span data-reactid=".0.3.1.1.0.1.2.0.1.0.1.1"> Expand All</span>
+    #   CSS-selector:    #expand-init > span:nth-child(2)
+    expand_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#expand-init > span:nth-child(2)")))
+    wait_for_obscuring_elements(mydriver)
+    expand_btn.click()
+    sleep(2)
+
+
+    # --- Upload files
+
+    if len(datadict["path"]) != 0 and datadict["path"] != " ":
+        # upload-button: <span data-reactid=".0.3.1.1.0.0.0.0.0.0.1.2.3">Upload Files</span>
+        #   a.btn-primary:nth-child(3) > span:nth-child(4)
+        wait_for_obscuring_elements(mydriver)
+        upload_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn-primary:nth-child(3) > span:nth-child(4)")))
+        upload_btn.click()
+        wait_for_obscuring_elements(mydriver)
+        fileupload_field = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".col-md-offset-2 > span:nth-child(1)")))
+
+        filepaths_to_upload = get_paths_uploadfiles(args.folder_path_uploadfiles, datadict["path"])
+        verbose_print(f"\nFiles that will be uploaded: {[os.path.basename(f) for f in filepaths_to_upload]}\n", args.verbose)
+        for singlefile in filepaths_to_upload:
+            drag_and_drop_file(fileupload_field, singlefile)
+
+        # when a file is uploaded and its progress bar is complete, a text appears: "File added to queue for upload."
+        #   To check that the files are completey uploaded, this text has to be there as often as the number of files:
+        filecount = len(filepaths_to_upload)
+        verbose_print(f"filecount: {filecount}", args.verbose)
+        # wait until the text has appeared as often as there are files:
+        #   (to wait longer for uploads to be completed, change the number in WebDriverWait(mydriver, ...) - it is the waiting time in seconds)
+        WebDriverWait(mydriver, 2000).until(lambda x: True if len(mydriver.find_elements(By.XPATH, "//span[text()='File added to queue for upload.']")) == filecount else False)
+        verbose_print("\nEverything should be uploaded completely now.\n", args.verbose)
+
+
+        # close-btn: .importFileModal > div:nth-child(3) > button:nth-child(1)
+        wait_for_obscuring_elements(mydriver)
+        close_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".importFileModal > div:nth-child(3) > button:nth-child(1)")))
+        close_btn.click()
+
+
+    # --- Government agency
+
+    # government add value: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey1.0.2.2"> add value</span>
+    #   CSS-selector: #groupAttr0 > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)
+    agency_investigator = [datadict["5_agency"], datadict["5_agency2"]]
+    for singleinput in agency_investigator:
+        if len(singleinput) != 0 and singleinput != " ":
+            add_gvmnt_value = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#groupAttr0 > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)")))
+            verbose_print("add_gvmnt_value found", args.verbose)
+            wait_for_obscuring_elements(mydriver)
+            add_gvmnt_value.click()
+            # <a href="#org" aria-controls="org" role="tab" data-toggle="tab" data-reactid=".2.0.0.1.0.1.0">Organization/Agency</a>
+            #    css-selector: div.modal:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(2) > ul:nth-child(1) > li:nth-child(2) > a:nth-child(1)
+            agency_tab = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.LINK_TEXT, "Organization/Agency")))
+            verbose_print("agency_tab found", args.verbose)
+            wait_for_obscuring_elements(mydriver)
+            agency_tab.click()
+            # <input type="text" name="orgName" id="orgName" required="" class="form-control ui-autocomplete-input" value="" data-reactid=".2.0.0.1.1.1.0.0.0.1.0.0.0.1.0" autocomplete="off">
+            agency_field = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.ID, "orgName")))
+            agency_field.send_keys(singleinput)
+            # Wait a moment for the dropdown to appear
+            sleep(0.5)
+            # Click on the Organization Name label to dismiss the dropdown
+            try:
+                # Try to find label associated with orgName field
+                org_label = mydriver.find_element(By.CSS_SELECTOR, "label[for='orgName']")
+                org_label.click()
+                sleep(0.3)
+            except Exception:
+                # Fallback: try clicking on text "Organization Name" or modal header
+                try:
+                    org_label = WebDriverWait(mydriver, 5).until(EC.element_to_be_clickable((By.XPATH, "//label[contains(text(), 'Organization') or contains(text(), 'Agency')]")))
+                    org_label.click()
+                    sleep(0.3)
+                except Exception:
+                    # If label not found, try clicking elsewhere in the modal to dismiss dropdown
+                    try:
+                        modal_header = mydriver.find_element(By.CSS_SELECTOR, ".modal-header, .modal-title")
+                        modal_header.click()
+                        sleep(0.3)
+                    except Exception:
+                        # Last resort: press Escape key to close dropdown
+                        agency_field.send_keys(Keys.ESCAPE)
+                        sleep(0.3)
+            # submit: <button type="button" class="btn btn-primary save-org" data-reactid=".2.0.0.1.1.1.0.0.0.1.0.0.1.0.0">Save &amp; Apply</button>
+            #   .save-org
+            wait_for_obscuring_elements(mydriver)
+            submit_agency_btn = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".save-org")))
+            submit_agency_btn.click()
+
+
+    # --- Summary
+
+    summarytext = datadict["6_summary_description"]
+    if len(summarytext) != 0 and summarytext != " ":
+        # summary edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey2.$dcterms_description_0.1.0.0.0.2.1"> edit</span>
+        #   CSS-selector: #edit-dcterms_description_0 > span:nth-child(2)
+        edit_summary = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-dcterms_description_0 > span:nth-child(2)")))
+        verbose_print("edit_summary found", args.verbose)
+        wait_for_obscuring_elements(mydriver)
+        edit_summary.click()
+        # summary form: The WYSIWYG editor is inside an iframe with class "wysihtml5-sandbox"
+        #   First, find and switch to the iframe
+        wysihtml5_iframe = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, "iframe.wysihtml5-sandbox")))
+        mydriver.switch_to.frame(wysihtml5_iframe)
+        # Now find the body element inside the iframe
+        summary_form = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        # Click to focus the contenteditable element
+        summary_form.click()
+        sleep(0.3)
+        # Clear any existing content
+        summary_form.send_keys(Keys.CONTROL + "a")
+        sleep(0.2)
+        # Use JavaScript to set the text content (more reliable for contenteditable elements)
+        mydriver.execute_script("arguments[0].textContent = arguments[1];", summary_form, datadict["6_summary_description"])
+        # Trigger input event to ensure the editor recognizes the change
+        mydriver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", summary_form)
+        sleep(0.3)
+        # Switch back to default content before clicking save button (which is outside iframe)
+        mydriver.switch_to.default_content()
+        wait_for_obscuring_elements(mydriver)
+        # save: <i class="glyphicon glyphicon-ok"></i>
+        #   .glyphicon-ok
+        save_summary_btn = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".glyphicon-ok")))
+        wait_for_obscuring_elements(mydriver)
+        save_summary_btn.click()
+    else:
+        warning_msg = "The summary is mandatory for the DataLumos project! Please fill it in manually."
+        row_warnings.append(warning_msg)
+        verbose_print(warning_msg, args.verbose)
+
+
+    # --- Original Distribution url
+
+    original_url_text = datadict["7_original_distribution_url"]
+    if len(original_url_text) != 0 and original_url_text != " ":
+        # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey4.$imeta_sourceURL_0.1.0.0.0.2.0.1"> edit</span>
+        #   css-sel: #edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)
+        orig_distr_edit = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)")))
+        wait_for_obscuring_elements(mydriver)
+        orig_distr_edit.click()
+        # form: <input type="text" class="form-control input-sm" style="padding-right: 24px;">
+        #   css-sel.: .editable-input > input:nth-child(1)
+        orig_distr_form = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".editable-input > input:nth-child(1)")))
+        wait_for_obscuring_elements(mydriver)
+        orig_distr_form.send_keys(original_url_text)
+        # save: <button type="submit" class="btn btn-primary btn-sm editable-submit"><i class="glyphicon glyphicon-ok"></i> save</button>
+        #   css-sel: .editable-submit
+        orig_distr_form.submit()
+
+
+    # --- Subject Terms / keywords
+
+    # form: <input class="select2-search__field" type="search" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" role="textbox" aria-autocomplete="list" placeholder="" style="width: 0.75em;">
+    #   css-sel: .select2-search__field
+    # scroll bar: <li class="select2-results__option select2-results__option--highlighted" role="treeitem" aria-selected="false">HIFLD Open</li>
+    #    css-sel: .select2-results__option
+    keywordcells = [datadict["8_subject_terms1"], datadict["8_subject_terms2"], datadict["8_keywords"]]
+    keywords_to_insert = []
+    for single_keywordcell in keywordcells:
+        if len(single_keywordcell) != 0 and single_keywordcell != " ":
+            more_keywords = single_keywordcell.replace("'", "").replace("[", "").replace("]", "").replace('"', '')  # remove quotes and brackets
+            more_keywordslist = more_keywords.split(",")
+            keywords_to_insert += more_keywordslist
+    verbose_print(f"\nkeywords_to_insert: {keywords_to_insert}\n", args.verbose)
+    for single_keyword in keywords_to_insert:
+        keyword = single_keyword.strip(" '")
+        try:
+            wait_for_obscuring_elements(mydriver)
+            keywords_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".select2-search__field")))
+            keywords_form.click()
+            keywords_form.send_keys(keyword)
+            #sleep(2)
+            wait_for_obscuring_elements(mydriver)
+            #keyword_sugg = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".select2-results__option")))
+            # find the list element, taking care to match the exact text [suggestion from user sefk]:
+            keyword_sugg = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.XPATH, f"//li[contains(@class, 'select2-results__option') and text()='{keyword}']")))
+            wait_for_obscuring_elements(mydriver)
+            keyword_sugg.click()
+        except Exception as e:
+            error_msg = f"Problem with keywords: {str(e)}"
+            row_errors.append(error_msg)
+            verbose_print(f"\n⚠ There was a problem with the keywords! Please check if one or more are missing in the form and fill them in manually.\n Problem:", args.verbose)
+            verbose_print(traceback.format_exc(), args.verbose)
+
+
+    # --- Geographic Coverage
+
+    geographic_coverage_text = datadict["9_geographic_coverage"]
+    if len(geographic_coverage_text) != 0 and geographic_coverage_text != " ":
+        # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey1.0.5:$dcterms_location_0_0.0.0.0.0.2.0.1"> edit</span>
+        #   css-sel: #edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)
+        geogr_cov_edit = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)")))
+        verbose_print("edit-button geogr_cov_form found", args.verbose)
+        wait_for_obscuring_elements(mydriver)
+        geogr_cov_edit.click()
+        # form: <input type="text" class="form-control input-sm" style="padding-right: 24px;">
+        #   .editable-input > input:nth-child(1)
+        geogr_cov_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".editable-input > input:nth-child(1)")))
+        wait_for_obscuring_elements(mydriver)
+        geogr_cov_form.send_keys(geographic_coverage_text)
+        geogr_cov_form.submit()
+
+
+    # --- Time Period
+
+    timeperiod_start_text = datadict["10_time_period1"]
+    timeperiod_end_text = datadict["10_time_period2"]
+    if len(timeperiod_start_text) != 0 or len(timeperiod_end_text) != 0:
+        # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey2.0.2.2"> add value</span>
+        #   #groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)
+        time_period_add_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)")))
+        verbose_print("time_period_add_btn found", args.verbose)
+        wait_for_obscuring_elements(mydriver)
+        time_period_add_btn.click()
+        # start: <input type="text" class="form-control" name="startDate" id="startDate" required="" placeholder="YYYY-MM-DD or YYYY-MM or YYYY" title="Enter as YYYY-MM-DD or YYYY-MM or YYYY" value="" data-reactid=".4.0.0.1.1.0.1.0">
+        #   #startDate
+        time_period_start = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#startDate")))
+        wait_for_obscuring_elements(mydriver)
+        time_period_start.send_keys(timeperiod_start_text)
+        # <input type="text" class="form-control" name="endDate" id="endDate" placeholder="YYYY-MM-DD or YYYY-MM or YYYY" title="Enter as YYYY-MM-DD or YYYY-MM or YYYY" value="" data-reactid=".4.0.0.1.1.1.1.0">
+        #   #endDate
+        time_period_end = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#endDate")))
+        wait_for_obscuring_elements(mydriver)
+        time_period_end.send_keys(timeperiod_end_text)
+        # <button type="button" class="btn btn-primary save-dates" data-reactid=".4.0.0.1.1.3.0.0">Save &amp; Apply</button>
+        #    .save-dates
+        save_time_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".save-dates")))
+        wait_for_obscuring_elements(mydriver)
+        save_time_btn.click()
+
+
+    # --- Data types
+
+    datatype_to_select = datadict["11_data_types"]
+    if len(datatype_to_select) != 0 and datatype_to_select != " ":
+        # <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey5.$disco_kindOfData_0.1.0.0.0.2.1"> edit</span>
+        #   #disco_kindOfData_0 > span:nth-child(2)
+        datatypes_edit_btn = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#disco_kindOfData_0 > span:nth-child(2)")))
+        wait_for_obscuring_elements(mydriver)
+        datatypes_edit_btn.click()
+        wait_for_obscuring_elements(mydriver)
+        # <span> geographic information system (GIS) data</span>  # (there is a space character at the beginning of the string!)
+        #   .editable-checklist > div:nth-child(8) > label:nth-child(1) > span:nth-child(2)
+        datatype_text = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.XPATH, f"//span[contains(text(), '{datatype_to_select}')]")))
+        datatype_text.click()
+        # <button type="submit" class="btn btn-primary btn-sm editable-submit"><i class="glyphicon glyphicon-ok"></i> save</button>
+        #   .editable-submit
+        datatypes_save_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".editable-submit")))
+        datatypes_save_btn.click()
+
+
+    # --- Collection Notes
+
+    if len(datadict["12_collection_notes"]) != 0 or len(datadict["12_download_date_original_source"]) != 0:
+        # check if there is data in the date field (otherwise set it to empty string):
+        downloaddate = f"(Downloaded {datadict['12_download_date_original_source']})" if len(datadict["12_download_date_original_source"]) != 0 else ""
+        # the text for collection notes is the note and the download date, if the note cell in the csv file isn't empty (otherwise it's only the date):
+        text_for_collectionnotes = datadict["12_collection_notes"] + " " + downloaddate if len(datadict["12_collection_notes"]) != 0 and datadict["12_collection_notes"] != " " else downloaddate
+        # css-sel.: #edit-imeta_collectionNotes_0 > span:nth-child(2)
+        coll_notes_edit_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-imeta_collectionNotes_0 > span:nth-child(2)")))
+        wait_for_obscuring_elements(mydriver)
+        coll_notes_edit_btn.click()
+        # The WYSIWYG editor is inside an iframe with class "wysihtml5-sandbox"
+        #   First, find and switch to the iframe
+        wysihtml5_iframe = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "iframe.wysihtml5-sandbox")))
+        mydriver.switch_to.frame(wysihtml5_iframe)
+        # Now find the body element inside the iframe
+        coll_notes_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        # Click to focus the contenteditable element
+        coll_notes_form.click()
+        sleep(0.3)
+        # Clear any existing content
+        coll_notes_form.send_keys(Keys.CONTROL + "a")
+        sleep(0.2)
+        # Use JavaScript to set the text content (more reliable for contenteditable elements)
+        mydriver.execute_script("arguments[0].textContent = arguments[1];", coll_notes_form, text_for_collectionnotes)
+        # Trigger input event to ensure the editor recognizes the change
+        mydriver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", coll_notes_form)
+        sleep(0.3)
+        # Switch back to default content before clicking save button (which is outside iframe)
+        mydriver.switch_to.default_content()
+        wait_for_obscuring_elements(mydriver)
+        # css-sel: .editable-submit
+        coll_notes_save_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".editable-submit")))
+        coll_notes_save_btn.click()
+    
+    return workspace_id
+
+
+def find_row_by_url(service, sheet_id, sheet_name, url_column, source_url, verbose=False):
+    """
+    Find the row number in Google Sheet by matching URL in the specified column.
+    
+    Args:
+        service: Google Sheets API service object
+        sheet_id: Google Sheet ID
+        sheet_name: Name of the worksheet/tab
+        url_column: Column letter containing URLs (e.g., "F")
+        source_url: URL to search for
+        verbose: Whether to print verbose messages
+    
+    Returns:
+        Row number (1-indexed) if found, None otherwise
+    """
+    try:
+        # Read all values from the URL column (starting from row 2 to skip header)
+        range_name = f"{sheet_name}!{url_column}2:{url_column}"
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=range_name
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        # Search for matching URL (case-insensitive, handle partial matches)
+        source_url_clean = source_url.strip().lower()
+        for idx, row in enumerate(values):
+            if row and len(row) > 0:
+                cell_url = str(row[0]).strip().lower()
+                # Check for exact match or if source_url is contained in cell_url
+                if source_url_clean == cell_url or source_url_clean in cell_url or cell_url in source_url_clean:
+                    # Row number is idx + 2 (idx is 0-based, +1 for header, +1 for 1-indexing)
+                    row_num = idx + 2
+                    verbose_print(f"  Found matching URL in row {row_num}: {row[0]}", verbose)
+                    return row_num
+        
+        return None
+        
+    except Exception as e:
+        verbose_print(f"  Error searching for URL: {str(e)}", verbose)
+        return None
+
+
+def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, workspace_id, datadict, username='mkraley', verbose=False):
+    """
+    Update a Google Sheet with publishing results by finding row via URL match.
+    
+    Args:
+        sheet_id: Google Sheet ID (from URL)
+        credentials_path: Path to service account credentials JSON file
+        sheet_name: Name of the worksheet/tab
+        source_url: Source URL to match against column F
+        workspace_id: Workspace ID for creating download location URL
+        datadict: Dictionary containing CSV row data
+        username: Username to write in "Claimed" column (default: 'mkraley')
+        verbose: Whether to print verbose messages
+    
+    Returns:
+        Tuple of (success: bool, error_message: str or None)
+    """
+    if not GOOGLE_SHEETS_AVAILABLE:
+        return False, "Google Sheets API libraries not installed. Install with: pip install google-api-python-client google-auth google-auth-httplib2"
+    
+    if not sheet_id or not credentials_path:
+        return False, "Google Sheet ID and credentials path are required"
+    
+    if not source_url:
+        return False, "Source URL is required to find matching row"
+    
+    try:
+        # Authenticate using service account
+        credentials = service_account.Credentials.from_service_account_file(
+            credentials_path,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        service = build('sheets', 'v4', credentials=credentials)
+        
+        # Find row by matching URL in column F
+        verbose_print(f"  Searching for URL in sheet: {source_url}", verbose)
+        row_number = find_row_by_url(service, sheet_id, sheet_name, 'F', source_url, verbose)
+        
+        if not row_number:
+            error_msg = f"Could not find row with matching URL: {source_url}"
+            verbose_print(f"  ⚠ {error_msg}", verbose)
+            return False, error_msg
+        
+        verbose_print(f"  Found matching row: {row_number}", verbose)
+        
+        # Prepare update requests for all columns
+        update_requests = []
+        
+        # Column A: Claimed (add your name)
+        update_requests.append({
+            'range': f"{sheet_name}!A{row_number}",
+            'values': [[username]]
+        })
+        
+        # Column B: Data Added (Y/N/IP)
+        update_requests.append({
+            'range': f"{sheet_name}!B{row_number}",
+            'values': [['Y']]
+        })
+        
+        # Column G: Dataset Download Possible?
+        update_requests.append({
+            'range': f"{sheet_name}!G{row_number}",
+            'values': [['Y']]
+        })
+        
+        # Column I: Nominated to EOT / USGWDA
+        update_requests.append({
+            'range': f"{sheet_name}!I{row_number}",
+            'values': [['Y']]
+        })
+        
+        # Column J: Date Downloaded
+        download_date = datadict.get("12_download_date_original_source", "").strip()
+        if download_date:
+            update_requests.append({
+                'range': f"{sheet_name}!J{row_number}",
+                'values': [[download_date]]
+            })
+        
+        # Column K: Download Location
+        if workspace_id:
+            download_location = f"https://www.datalumos.org/datalumos/project/{workspace_id}/version/V1/view"
+            update_requests.append({
+                'range': f"{sheet_name}!K{row_number}",
+                'values': [[download_location]]
+            })
+        
+        # Column L: Dataset Size
+        dataset_size = datadict.get("dataset_size", "").strip()
+        if dataset_size:
+            update_requests.append({
+                'range': f"{sheet_name}!L{row_number}",
+                'values': [[dataset_size]]
+            })
+        
+        # Column M: File extensions of data uploads
+        file_extensions = datadict.get("file_extensions", "").strip()
+        if file_extensions:
+            update_requests.append({
+                'range': f"{sheet_name}!M{row_number}",
+                'values': [[file_extensions]]
+            })
+        
+        # Column N: Metadata availability info
+        update_requests.append({
+            'range': f"{sheet_name}!N{row_number}",
+            'values': [['Y']]
+        })
+        
+        if not update_requests:
+            return False, "No data to update"
+        
+        # Batch update
+        body = {
+            'valueInputOption': 'USER_ENTERED',
+            'data': update_requests
+        }
+        
+        result = service.spreadsheets().values().batchUpdate(
+            spreadsheetId=sheet_id,
+            body=body
+        ).execute()
+        
+        verbose_print(f"✓ Successfully updated Google Sheet row {row_number} with {len(update_requests)} columns", verbose)
+        return True, None
+        
+    except FileNotFoundError:
+        error_msg = f"Credentials file not found: {credentials_path}"
+        verbose_print(f"⚠ {error_msg}", verbose)
+        return False, error_msg
+    except HttpError as e:
+        error_msg = f"Google Sheets API error: {str(e)}"
+        verbose_print(f"⚠ {error_msg}", verbose)
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Error updating Google Sheet: {str(e)}"
+        verbose_print(f"⚠ {error_msg}", verbose)
+        verbose_print(traceback.format_exc(), verbose)
+        return False, error_msg
+
+
+def publish_workspace(mydriver, verbose=False):
+    """
+    Execute the publishing workflow for a workspace.
+    
+    Args:
+        mydriver: WebDriver instance
+        verbose: Whether to print verbose messages
+    
+    Returns:
+        Tuple of (success: bool, error_message: str or None)
+    """
+    verbose_print("\nStarting publish workflow...", verbose)
+    
+    try:
+        # Step 1: Click "Publish Project" button
+        # <button type="submit" class="btn btn-primary btn-sm" ...>Publish Project</button>
+        publish_project_btn = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Publish Project')]"))
+        )
+        verbose_print("Found 'Publish Project' button", verbose)
+        wait_for_obscuring_elements(mydriver)
+        publish_project_btn.click()
+        
+        # Wait for navigation to review/publish page
+        WebDriverWait(mydriver, 30).until(
+            lambda d: 'reviewPublish' in d.current_url
+        )
+        verbose_print(f"Navigated to review/publish page: {mydriver.current_url}", verbose)
+        sleep(1)
+        
+        # Step 2: Click "Proceed to Publish" button
+        # <button type="submit" class="btn btn-primary btn-sm" ...>Proceed to Publish</button>
+        proceed_publish_btn = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Proceed to Publish')]"))
+        )
+        verbose_print("Found 'Proceed to Publish' button", verbose)
+        wait_for_obscuring_elements(mydriver)
+        proceed_publish_btn.click()
+        sleep(1)
+        
+        # Step 3: In the dialog, select options
+        # Radio button: <input type="radio" name="disclosure" id="noDisclosure" ...>
+        no_disclosure_radio = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.ID, "noDisclosure"))
+        )
+        verbose_print("Found 'noDisclosure' radio button", verbose)
+        wait_for_obscuring_elements(mydriver)
+        no_disclosure_radio.click()
+        sleep(0.5)
+        
+        # Radio button: <input type="radio" name="sensitive" id="sensitiveNo" ...>
+        sensitive_no_radio = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.ID, "sensitiveNo"))
+        )
+        verbose_print("Found 'sensitiveNo' radio button", verbose)
+        wait_for_obscuring_elements(mydriver)
+        sensitive_no_radio.click()
+        sleep(0.5)
+        
+        # Checkbox: <input type="checkbox" id="depositAgree" ...>
+        deposit_agree_checkbox = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.ID, "depositAgree"))
+        )
+        verbose_print("Found 'depositAgree' checkbox", verbose)
+        wait_for_obscuring_elements(mydriver)
+        deposit_agree_checkbox.click()
+        sleep(0.5)
+        
+        # Step 4: Click "Publish Data" button
+        # <button type="button" class="btn btn-primary" ...>Publish Data</button>
+        publish_data_btn = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Publish Data')]"))
+        )
+        verbose_print("Found 'Publish Data' button", verbose)
+        wait_for_obscuring_elements(mydriver)
+        publish_data_btn.click()
+        sleep(2)
+        
+        # Step 5: Click "Back to Project" button
+        # <button type="button" class="btn btn-primary" ...>Back to Project</button>
+        back_to_project_btn = WebDriverWait(mydriver, 50).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Back to Project')]"))
+        )
+        verbose_print("Found 'Back to Project' button", verbose)
+        wait_for_obscuring_elements(mydriver)
+        back_to_project_btn.click()
+        sleep(2)
+        
+        # Wait for navigation back to workspace
+        WebDriverWait(mydriver, 30).until(
+            lambda d: '/datalumos/' in d.current_url and 'reviewPublish' not in d.current_url
+        )
+        verbose_print(f"Returned to workspace: {mydriver.current_url}", verbose)
+        verbose_print("✓ Publishing workflow completed successfully", verbose)
+        return True, None
+        
+    except Exception as e:
+        error_msg = f"Error during publishing workflow: {str(e)}"
+        verbose_print(f"⚠ {error_msg}", verbose)
+        verbose_print(traceback.format_exc(), verbose)
+        return False, error_msg
+
+
 
 def main():
     """Main execution function."""
@@ -445,348 +1116,71 @@ def main():
             source_url = None
 
             try:
-                new_project_btn = WebDriverWait(mydriver, 360).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn > span:nth-child(3)"))) # .btn > span:nth-child(3)
-                verbose_print("button found", args.verbose)
-                wait_for_obscuring_elements(mydriver)
-                new_project_btn.click()
-
                 datadict = read_csv_line(args.csv_file_path, current_row)
                 verbose_print(f"\n{datadict}", args.verbose)
                 verbose_print("\n----------------------------", args.verbose)
-                verbose_print(f"Processing row {current_row}, Title: {datadict['4_title']}\n", args.verbose)
                 
                 # Get source URL for summary
                 source_url = datadict.get("7_original_distribution_url", "")
-
-
-                # --- Title
-
-                # <input type="text" class="form-control" name="title" id="title" value="" data-reactid=".2.0.0.1.2.0.$0.$0.$0.$displayPropKey2.0.2.0">
-                project_title_form = WebDriverWait(mydriver, 10).until(EC.presence_of_element_located((By.ID, "title")))
-                # title with pre-title (if existent):
-                pojecttitle = datadict["4_title"] if len(datadict["4_pre_title"]) == 0 else datadict["4_pre_title"] + " " + datadict["4_title"]
-                project_title_form.send_keys(pojecttitle)
-                # .save-project
-                project_title_apply = WebDriverWait(mydriver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".save-project")))
-                verbose_print("project_title_apply - found", args.verbose)
-                project_title_apply.click()
-                # <a role="button" class="btn btn-primary" href="workspace?goToPath=/datalumos/239181&amp;goToLevel=project" data-reactid=".2.0.0.1.2.1.0.0.0">Continue To Project Workspace</a>
-                #   CSS-selector: a.btn-primary
-                project_title_apply2 = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.LINK_TEXT, "Continue To Project Workspace")))
-                verbose_print("Continue To Project Workspace - found", args.verbose)
-                project_title_apply2.click()
                 
-                # Wait for navigation to complete
-                wait_for_obscuring_elements(mydriver)
-                sleep(1)
-                
-                # Extract workspace ID from current URL after navigating to workspace
-                current_url = mydriver.current_url
-                # Look for /datalumos/ followed by digits in the URL
-                match = re.search(r'/datalumos/(\d+)', current_url)
-                if match:
-                    workspace_id = match.group(1)
-                    verbose_print(f"✓ Workspace ID: {workspace_id} (from URL: {current_url})", args.verbose)
-                else:
-                    warning_msg = f"Could not extract workspace ID from URL: {current_url}"
-                    row_warnings.append(warning_msg)
-                    verbose_print(f"⚠ {warning_msg}", args.verbose)
-
-
-                # --- expand everything
-
-                # collapse all: <span data-reactid=".0.3.1.1.0.1.2.0.1.0.1.1"> Collapse All</span>
-                #   css-selector: #expand-init > span:nth-child(2)
-                collapse_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#expand-init > span:nth-child(2)")))
-                wait_for_obscuring_elements(mydriver)
-                collapse_btn.click()
-                sleep(2)
-                # expand all: <span data-reactid=".0.3.1.1.0.1.2.0.1.0.1.1"> Expand All</span>
-                #   CSS-selector:    #expand-init > span:nth-child(2)
-                expand_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#expand-init > span:nth-child(2)")))
-                wait_for_obscuring_elements(mydriver)
-                expand_btn.click()
-                sleep(2)
-
-
-                # --- Government agency
-
-                # government add value: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey1.0.2.2"> add value</span>
-                #   CSS-selector: #groupAttr0 > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)
-                agency_investigator = [datadict["5_agency"], datadict["5_agency2"]]
-                for singleinput in agency_investigator:
-                    if len(singleinput) != 0 and singleinput != " ":
-                        add_gvmnt_value = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#groupAttr0 > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)")))
-                        verbose_print("add_gvmnt_value found", args.verbose)
-                        wait_for_obscuring_elements(mydriver)
-                        add_gvmnt_value.click()
-                        # <a href="#org" aria-controls="org" role="tab" data-toggle="tab" data-reactid=".2.0.0.1.0.1.0">Organization/Agency</a>
-                        #    css-selector: div.modal:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(2) > ul:nth-child(1) > li:nth-child(2) > a:nth-child(1)
-                        agency_tab = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.LINK_TEXT, "Organization/Agency")))
-                        verbose_print("agency_tab found", args.verbose)
-                        wait_for_obscuring_elements(mydriver)
-                        agency_tab.click()
-                        # <input type="text" name="orgName" id="orgName" required="" class="form-control ui-autocomplete-input" value="" data-reactid=".2.0.0.1.1.1.0.0.0.1.0.0.0.1.0" autocomplete="off">
-                        agency_field = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.ID, "orgName")))
-                        agency_field.send_keys(singleinput)
-                        # Wait a moment for the dropdown to appear
-                        sleep(0.5)
-                        # Click on the Organization Name label to dismiss the dropdown
-                        try:
-                            # Try to find label associated with orgName field
-                            org_label = mydriver.find_element(By.CSS_SELECTOR, "label[for='orgName']")
-                            org_label.click()
-                            sleep(0.3)
-                        except Exception:
-                            # Fallback: try clicking on text "Organization Name" or modal header
-                            try:
-                                org_label = WebDriverWait(mydriver, 5).until(EC.element_to_be_clickable((By.XPATH, "//label[contains(text(), 'Organization') or contains(text(), 'Agency')]")))
-                                org_label.click()
-                                sleep(0.3)
-                            except Exception:
-                                # If label not found, try clicking elsewhere in the modal to dismiss dropdown
-                                try:
-                                    modal_header = mydriver.find_element(By.CSS_SELECTOR, ".modal-header, .modal-title")
-                                    modal_header.click()
-                                    sleep(0.3)
-                                except Exception:
-                                    # Last resort: press Escape key to close dropdown
-                                    agency_field.send_keys(Keys.ESCAPE)
-                                    sleep(0.3)
-                        # submit: <button type="button" class="btn btn-primary save-org" data-reactid=".2.0.0.1.1.1.0.0.0.1.0.0.1.0.0">Save &amp; Apply</button>
-                        #   .save-org
-                        wait_for_obscuring_elements(mydriver)
-                        submit_agency_btn = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".save-org")))
-                        submit_agency_btn.click()
-
-
-                # --- Summary
-
-                summarytext = datadict["6_summary_description"]
-                if len(summarytext) != 0 and summarytext != " ":
-                    # summary edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey2.$dcterms_description_0.1.0.0.0.2.1"> edit</span>
-                    #   CSS-selector: #edit-dcterms_description_0 > span:nth-child(2)
-                    edit_summary = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-dcterms_description_0 > span:nth-child(2)")))
-                    verbose_print("edit_summary found", args.verbose)
-                    wait_for_obscuring_elements(mydriver)
-                    edit_summary.click()
-                    # summary form: The WYSIWYG editor is inside an iframe with class "wysihtml5-sandbox"
-                    #   First, find and switch to the iframe
-                    wysihtml5_iframe = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, "iframe.wysihtml5-sandbox")))
-                    mydriver.switch_to.frame(wysihtml5_iframe)
-                    # Now find the body element inside the iframe
-                    summary_form = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
-                    # Click to focus the contenteditable element
-                    summary_form.click()
-                    sleep(0.3)
-                    # Clear any existing content
-                    summary_form.send_keys(Keys.CONTROL + "a")
-                    sleep(0.2)
-                    # Use JavaScript to set the text content (more reliable for contenteditable elements)
-                    mydriver.execute_script("arguments[0].textContent = arguments[1];", summary_form, datadict["6_summary_description"])
-                    # Trigger input event to ensure the editor recognizes the change
-                    mydriver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", summary_form)
-                    sleep(0.3)
-                    # Switch back to default content before clicking save button (which is outside iframe)
-                    mydriver.switch_to.default_content()
-                    wait_for_obscuring_elements(mydriver)
-                    # save: <i class="glyphicon glyphicon-ok"></i>
-                    #   .glyphicon-ok
-                    save_summary_btn = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".glyphicon-ok")))
-                    wait_for_obscuring_elements(mydriver)
-                    save_summary_btn.click()
-                else:
-                    warning_msg = "The summary is mandatory for the DataLumos project! Please fill it in manually."
-                    row_warnings.append(warning_msg)
-                    verbose_print(warning_msg, args.verbose)
-
-
-                # --- Original Distribution url
-
-                original_url_text = datadict["7_original_distribution_url"]
-                if len(original_url_text) != 0 and original_url_text != " ":
-                    # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey4.$imeta_sourceURL_0.1.0.0.0.2.0.1"> edit</span>
-                    #   css-sel: #edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)
-                    orig_distr_edit = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)")))
-                    wait_for_obscuring_elements(mydriver)
-                    orig_distr_edit.click()
-                    # form: <input type="text" class="form-control input-sm" style="padding-right: 24px;">
-                    #   css-sel.: .editable-input > input:nth-child(1)
-                    orig_distr_form = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".editable-input > input:nth-child(1)")))
-                    wait_for_obscuring_elements(mydriver)
-                    orig_distr_form.send_keys(original_url_text)
-                    # save: <button type="submit" class="btn btn-primary btn-sm editable-submit"><i class="glyphicon glyphicon-ok"></i> save</button>
-                    #   css-sel: .editable-submit
-                    orig_distr_form.submit()
-
-
-                # --- Subject Terms / keywords
-
-                # form: <input class="select2-search__field" type="search" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" role="textbox" aria-autocomplete="list" placeholder="" style="width: 0.75em;">
-                #   css-sel: .select2-search__field
-                # scroll bar: <li class="select2-results__option select2-results__option--highlighted" role="treeitem" aria-selected="false">HIFLD Open</li>
-                #    css-sel: .select2-results__option
-                keywordcells = [datadict["8_subject_terms1"], datadict["8_subject_terms2"], datadict["8_keywords"]]
-                keywords_to_insert = []
-                for single_keywordcell in keywordcells:
-                    if len(single_keywordcell) != 0 and single_keywordcell != " ":
-                        more_keywords = single_keywordcell.replace("'", "").replace("[", "").replace("]", "").replace('"', '')  # remove quotes and brackets
-                        more_keywordslist = more_keywords.split(",")
-                        keywords_to_insert += more_keywordslist
-                verbose_print(f"\nkeywords_to_insert: {keywords_to_insert}\n", args.verbose)
-                for single_keyword in keywords_to_insert:
-                    keyword = single_keyword.strip(" '")
-                    try:
-                        wait_for_obscuring_elements(mydriver)
-                        keywords_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".select2-search__field")))
-                        keywords_form.click()
-                        keywords_form.send_keys(keyword)
-                        #sleep(2)
-                        wait_for_obscuring_elements(mydriver)
-                        #keyword_sugg = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".select2-results__option")))
-                        # find the list element, taking care to match the exact text [suggestion from user sefk]:
-                        keyword_sugg = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.XPATH, f"//li[contains(@class, 'select2-results__option') and text()='{keyword}']")))
-                        wait_for_obscuring_elements(mydriver)
-                        keyword_sugg.click()
-                    except Exception as e:
-                        error_msg = f"Problem with keywords: {str(e)}"
+                # Handle only-publish mode: navigate directly to workspace
+                if args.publish_mode == 'only-publish':
+                    # Read workspace ID from CSV (datalumos_id column)
+                    workspace_id = datadict.get('datalumos_id', '').strip()
+                    if not workspace_id:
+                        error_msg = f"Row {current_row}: No workspace ID found in datalumos_id column. Cannot publish."
                         row_errors.append(error_msg)
-                        verbose_print(f"\n⚠ There was a problem with the keywords! Please check if one or more are missing in the form and fill them in manually.\n Problem:", args.verbose)
+                        if not args.verbose:
+                            print(f"[{batch_num}/{total_rows}] Workspace ID: N/A | Source URL: {source_url if source_url else 'N/A'}")
+                            print(f"  ✗ ERROR: {error_msg}")
+                        else:
+                            verbose_print(f"✗ {error_msg}", args.verbose)
+                        continue
+                    
+                    # Navigate directly to workspace
+                    workspace_url = f"https://www.datalumos.org/datalumos/workspace?goToPath=/datalumos/{workspace_id}&goToLevel=project"
+                    verbose_print(f"Navigating to workspace: {workspace_url}", args.verbose)
+                    mydriver.get(workspace_url)
+                    wait_for_obscuring_elements(mydriver)
+                    sleep(2)
+                    verbose_print(f"Processing row {current_row} (only-publish mode), Workspace ID: {workspace_id}\n", args.verbose)
+                else:
+                    # Normal mode: create project and fill forms
+                    verbose_print(f"Processing row {current_row}, Title: {datadict['4_title']}\n", args.verbose)
+                    workspace_id = fill_project_forms(mydriver, datadict, args, row_errors, row_warnings)
+
+                # --- Publish Project
+                
+                publish_success = False
+                if args.publish_mode != 'no-publish':
+                    publish_success, publish_error = publish_workspace(mydriver, args.verbose)
+                    if not publish_success:
+                        row_warnings.append(publish_error)
+                else:
+                    verbose_print("Skipping publish workflow (no-publish mode)", args.verbose)
+
+                # Update Google Sheet with publishing results (if configured)
+                if args.google_sheet_id and args.google_credentials and publish_success and workspace_id:
+                    try:
+                        gsheet_success, gsheet_error = update_google_sheet(
+                            args.google_sheet_id,
+                            args.google_credentials,
+                            args.google_sheet_name,
+                            source_url,
+                            workspace_id,
+                            datadict,
+                            username=args.google_username,
+                            verbose=args.verbose
+                        )
+                        if not gsheet_success:
+                            error_msg = f"Google Sheet update failed: {gsheet_error}"
+                            row_errors.append(error_msg)
+                            verbose_print(f"⚠ {error_msg}", args.verbose)
+                    except Exception as e:
+                        error_msg = f"Error updating Google Sheet: {str(e)}"
+                        row_errors.append(error_msg)
+                        verbose_print(f"⚠ {error_msg}", args.verbose)
                         verbose_print(traceback.format_exc(), args.verbose)
-
-
-                # --- Geographic Coverage
-
-                geographic_coverage_text = datadict["9_geographic_coverage"]
-                if len(geographic_coverage_text) != 0 and geographic_coverage_text != " ":
-                    # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey1.0.5:$dcterms_location_0_0.0.0.0.0.2.0.1"> edit</span>
-                    #   css-sel: #edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)
-                    geogr_cov_edit = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)")))
-                    verbose_print("edit-button geogr_cov_form found", args.verbose)
-                    wait_for_obscuring_elements(mydriver)
-                    geogr_cov_edit.click()
-                    # form: <input type="text" class="form-control input-sm" style="padding-right: 24px;">
-                    #   .editable-input > input:nth-child(1)
-                    geogr_cov_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".editable-input > input:nth-child(1)")))
-                    wait_for_obscuring_elements(mydriver)
-                    geogr_cov_form.send_keys(geographic_coverage_text)
-                    geogr_cov_form.submit()
-
-
-                # --- Time Period
-
-                timeperiod_start_text = datadict["10_time_period1"]
-                timeperiod_end_text = datadict["10_time_period2"]
-                if len(timeperiod_start_text) != 0 or len(timeperiod_end_text) != 0:
-                    # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey2.0.2.2"> add value</span>
-                    #   #groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)
-                    time_period_add_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)")))
-                    verbose_print("time_period_add_btn found", args.verbose)
-                    wait_for_obscuring_elements(mydriver)
-                    time_period_add_btn.click()
-                    # start: <input type="text" class="form-control" name="startDate" id="startDate" required="" placeholder="YYYY-MM-DD or YYYY-MM or YYYY" title="Enter as YYYY-MM-DD or YYYY-MM or YYYY" value="" data-reactid=".4.0.0.1.1.0.1.0">
-                    #   #startDate
-                    time_period_start = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#startDate")))
-                    wait_for_obscuring_elements(mydriver)
-                    time_period_start.send_keys(timeperiod_start_text)
-                    # <input type="text" class="form-control" name="endDate" id="endDate" placeholder="YYYY-MM-DD or YYYY-MM or YYYY" title="Enter as YYYY-MM-DD or YYYY-MM or YYYY" value="" data-reactid=".4.0.0.1.1.1.1.0">
-                    #   #endDate
-                    time_period_end = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#endDate")))
-                    wait_for_obscuring_elements(mydriver)
-                    time_period_end.send_keys(timeperiod_end_text)
-                    # <button type="button" class="btn btn-primary save-dates" data-reactid=".4.0.0.1.1.3.0.0">Save &amp; Apply</button>
-                    #    .save-dates
-                    save_time_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".save-dates")))
-                    wait_for_obscuring_elements(mydriver)
-                    save_time_btn.click()
-
-
-                # --- Data types
-
-                datatype_to_select = datadict["11_data_types"]
-                if len(datatype_to_select) != 0 and datatype_to_select != " ":
-                    # <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey5.$disco_kindOfData_0.1.0.0.0.2.1"> edit</span>
-                    #   #disco_kindOfData_0 > span:nth-child(2)
-                    datatypes_edit_btn = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#disco_kindOfData_0 > span:nth-child(2)")))
-                    wait_for_obscuring_elements(mydriver)
-                    datatypes_edit_btn.click()
-                    wait_for_obscuring_elements(mydriver)
-                    # <span> geographic information system (GIS) data</span>  # (there is a space character at the beginning of the string!)
-                    #   .editable-checklist > div:nth-child(8) > label:nth-child(1) > span:nth-child(2)
-                    datatype_text = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.XPATH, f"//span[contains(text(), '{datatype_to_select}')]")))
-                    datatype_text.click()
-                    # <button type="submit" class="btn btn-primary btn-sm editable-submit"><i class="glyphicon glyphicon-ok"></i> save</button>
-                    #   .editable-submit
-                    datatypes_save_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".editable-submit")))
-                    datatypes_save_btn.click()
-
-
-                # --- Collection Notes
-
-                if len(datadict["12_collection_notes"]) != 0 or len(datadict["12_download_date_original_source"]) != 0:
-                    # check if there is data in the date field (otherwise set it to empty string):
-                    downloaddate = f"(Downloaded {datadict['12_download_date_original_source']})" if len(datadict["12_download_date_original_source"]) != 0 else ""
-                    # the text for collection notes is the note and the download date, if the note cell in the csv file isn't empty (otherwise it's only the date):
-                    text_for_collectionnotes = datadict["12_collection_notes"] + " " + downloaddate if len(datadict["12_collection_notes"]) != 0 and datadict["12_collection_notes"] != " " else downloaddate
-                    # css-sel.: #edit-imeta_collectionNotes_0 > span:nth-child(2)
-                    coll_notes_edit_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-imeta_collectionNotes_0 > span:nth-child(2)")))
-                    wait_for_obscuring_elements(mydriver)
-                    coll_notes_edit_btn.click()
-                    # The WYSIWYG editor is inside an iframe with class "wysihtml5-sandbox"
-                    #   First, find and switch to the iframe
-                    wysihtml5_iframe = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "iframe.wysihtml5-sandbox")))
-                    mydriver.switch_to.frame(wysihtml5_iframe)
-                    # Now find the body element inside the iframe
-                    coll_notes_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
-                    # Click to focus the contenteditable element
-                    coll_notes_form.click()
-                    sleep(0.3)
-                    # Clear any existing content
-                    coll_notes_form.send_keys(Keys.CONTROL + "a")
-                    sleep(0.2)
-                    # Use JavaScript to set the text content (more reliable for contenteditable elements)
-                    mydriver.execute_script("arguments[0].textContent = arguments[1];", coll_notes_form, text_for_collectionnotes)
-                    # Trigger input event to ensure the editor recognizes the change
-                    mydriver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", coll_notes_form)
-                    sleep(0.3)
-                    # Switch back to default content before clicking save button (which is outside iframe)
-                    mydriver.switch_to.default_content()
-                    wait_for_obscuring_elements(mydriver)
-                    # css-sel: .editable-submit
-                    coll_notes_save_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".editable-submit")))
-                    coll_notes_save_btn.click()
-
-
-                # --- Upload files
-
-                if len(datadict["path"]) != 0 and datadict["path"] != " ":
-                    # upload-button: <span data-reactid=".0.3.1.1.0.0.0.0.0.0.1.2.3">Upload Files</span>
-                    #   a.btn-primary:nth-child(3) > span:nth-child(4)
-                    wait_for_obscuring_elements(mydriver)
-                    upload_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn-primary:nth-child(3) > span:nth-child(4)")))
-                    upload_btn.click()
-                    wait_for_obscuring_elements(mydriver)
-                    fileupload_field = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".col-md-offset-2 > span:nth-child(1)")))
-
-                    filepaths_to_upload = get_paths_uploadfiles(args.folder_path_uploadfiles, datadict["path"])
-                    verbose_print(f"\nFiles that will be uploaded: {[os.path.basename(f) for f in filepaths_to_upload]}\n", args.verbose)
-                    for singlefile in filepaths_to_upload:
-                        drag_and_drop_file(fileupload_field, singlefile)
-
-                    # when a file is uploaded and its progress bar is complete, a text appears: "File added to queue for upload."
-                    #   To check that the files are completey uploaded, this text has to be there as often as the number of files:
-                    filecount = len(filepaths_to_upload)
-                    verbose_print(f"filecount: {filecount}", args.verbose)
-                    # wait until the text has appeared as often as there are files:
-                    #   (to wait longer for uploads to be completed, change the number in WebDriverWait(mydriver, ...) - it is the waiting time in seconds)
-                    WebDriverWait(mydriver, 2000).until(lambda x: True if len(mydriver.find_elements(By.XPATH, "//span[text()='File added to queue for upload.']")) == filecount else False)
-                    verbose_print("\nEverything should be uploaded completely now.\n", args.verbose)
-
-
-                    # close-btn: .importFileModal > div:nth-child(3) > button:nth-child(1)
-                    wait_for_obscuring_elements(mydriver)
-                    close_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".importFileModal > div:nth-child(3) > button:nth-child(1)")))
-                    close_btn.click()
 
                 # Update CSV with workspace ID
                 if workspace_id:
