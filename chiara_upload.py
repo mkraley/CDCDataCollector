@@ -320,10 +320,10 @@ def sign_in(driver, username=None, password=None):
         return False, error_msg
 
 
-def wait_for_obscuring_elements(current_driver_obj):
+def wait_for_obscuring_elements(current_driver_obj, verbose=False):
     overlays = current_driver_obj.find_elements(By.ID, "busy")  # caution: find_elements, not find_element
     if len(overlays) != 0:  # there is an overlay
-        print(f"... (Waiting for overlay to disappear. Overlay(s): {overlays})")
+        verbose_print(f"... (Waiting for overlay to disappear. Overlay(s): {overlays})", verbose)
         for overlay in overlays:
             # Wait until the overlay becomes invisible:
             WebDriverWait(current_driver_obj, 360).until(EC.invisibility_of_element_located(overlay))
@@ -408,9 +408,12 @@ def update_csv_workspace_id(csv_file_path, row_number, workspace_id):
         # Read the CSV file
         df = pd.read_csv(csv_file_path)
         
-        # Ensure datalumos_id column exists
+        # Ensure datalumos_id column exists and is string type
         if 'datalumos_id' not in df.columns:
             df['datalumos_id'] = ''
+        
+        # Convert column to string type to avoid dtype warnings
+        df['datalumos_id'] = df['datalumos_id'].astype(str)
         
         # Update the specific row (row_number is 1-indexed, excluding header, so it maps to index row_number - 1)
         df.loc[row_number - 1, 'datalumos_id'] = str(workspace_id)
@@ -452,7 +455,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     # Normal mode: create project and fill forms
     new_project_btn = WebDriverWait(mydriver, 360).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn > span:nth-child(3)"))) # .btn > span:nth-child(3)
     verbose_print("button found", args.verbose)
-    wait_for_obscuring_elements(mydriver)
+    wait_for_obscuring_elements(mydriver, args.verbose)
     new_project_btn.click()
 
     verbose_print(f"Processing row, Title: {datadict['4_title']}\n", args.verbose)
@@ -476,7 +479,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     project_title_apply2.click()
     
     # Wait for navigation to complete
-    wait_for_obscuring_elements(mydriver)
+    wait_for_obscuring_elements(mydriver, args.verbose)
     sleep(1)
     
     # Extract workspace ID from current URL after navigating to workspace
@@ -497,13 +500,13 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     # collapse all: <span data-reactid=".0.3.1.1.0.1.2.0.1.0.1.1"> Collapse All</span>
     #   css-selector: #expand-init > span:nth-child(2)
     collapse_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#expand-init > span:nth-child(2)")))
-    wait_for_obscuring_elements(mydriver)
+    wait_for_obscuring_elements(mydriver, args.verbose)
     collapse_btn.click()
     sleep(2)
     # expand all: <span data-reactid=".0.3.1.1.0.1.2.0.1.0.1.1"> Expand All</span>
     #   CSS-selector:    #expand-init > span:nth-child(2)
     expand_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#expand-init > span:nth-child(2)")))
-    wait_for_obscuring_elements(mydriver)
+    wait_for_obscuring_elements(mydriver, args.verbose)
     expand_btn.click()
     sleep(2)
 
@@ -513,10 +516,10 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     if len(datadict["path"]) != 0 and datadict["path"] != " ":
         # upload-button: <span data-reactid=".0.3.1.1.0.0.0.0.0.0.1.2.3">Upload Files</span>
         #   a.btn-primary:nth-child(3) > span:nth-child(4)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         upload_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn-primary:nth-child(3) > span:nth-child(4)")))
         upload_btn.click()
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         fileupload_field = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".col-md-offset-2 > span:nth-child(1)")))
 
         filepaths_to_upload = get_paths_uploadfiles(args.folder_path_uploadfiles, datadict["path"])
@@ -535,7 +538,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
 
 
         # close-btn: .importFileModal > div:nth-child(3) > button:nth-child(1)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         close_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".importFileModal > div:nth-child(3) > button:nth-child(1)")))
         close_btn.click()
 
@@ -549,13 +552,13 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         if len(singleinput) != 0 and singleinput != " ":
             add_gvmnt_value = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#groupAttr0 > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)")))
             verbose_print("add_gvmnt_value found", args.verbose)
-            wait_for_obscuring_elements(mydriver)
+            wait_for_obscuring_elements(mydriver, args.verbose)
             add_gvmnt_value.click()
             # <a href="#org" aria-controls="org" role="tab" data-toggle="tab" data-reactid=".2.0.0.1.0.1.0">Organization/Agency</a>
             #    css-selector: div.modal:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(2) > ul:nth-child(1) > li:nth-child(2) > a:nth-child(1)
             agency_tab = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.LINK_TEXT, "Organization/Agency")))
             verbose_print("agency_tab found", args.verbose)
-            wait_for_obscuring_elements(mydriver)
+            wait_for_obscuring_elements(mydriver, args.verbose)
             agency_tab.click()
             # <input type="text" name="orgName" id="orgName" required="" class="form-control ui-autocomplete-input" value="" data-reactid=".2.0.0.1.1.1.0.0.0.1.0.0.0.1.0" autocomplete="off">
             agency_field = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.ID, "orgName")))
@@ -586,7 +589,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
                         sleep(0.3)
             # submit: <button type="button" class="btn btn-primary save-org" data-reactid=".2.0.0.1.1.1.0.0.0.1.0.0.1.0.0">Save &amp; Apply</button>
             #   .save-org
-            wait_for_obscuring_elements(mydriver)
+            wait_for_obscuring_elements(mydriver, args.verbose)
             submit_agency_btn = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".save-org")))
             submit_agency_btn.click()
 
@@ -599,7 +602,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         #   CSS-selector: #edit-dcterms_description_0 > span:nth-child(2)
         edit_summary = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-dcterms_description_0 > span:nth-child(2)")))
         verbose_print("edit_summary found", args.verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         edit_summary.click()
         # summary form: The WYSIWYG editor is inside an iframe with class "wysihtml5-sandbox"
         #   First, find and switch to the iframe
@@ -620,11 +623,11 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         sleep(0.3)
         # Switch back to default content before clicking save button (which is outside iframe)
         mydriver.switch_to.default_content()
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         # save: <i class="glyphicon glyphicon-ok"></i>
         #   .glyphicon-ok
         save_summary_btn = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".glyphicon-ok")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         save_summary_btn.click()
     else:
         warning_msg = "The summary is mandatory for the DataLumos project! Please fill it in manually."
@@ -639,12 +642,12 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         # edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey4.$imeta_sourceURL_0.1.0.0.0.2.0.1"> edit</span>
         #   css-sel: #edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)
         orig_distr_edit = WebDriverWait(mydriver, 100).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         orig_distr_edit.click()
         # form: <input type="text" class="form-control input-sm" style="padding-right: 24px;">
         #   css-sel.: .editable-input > input:nth-child(1)
         orig_distr_form = WebDriverWait(mydriver, 100).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".editable-input > input:nth-child(1)")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         orig_distr_form.send_keys(original_url_text)
         # save: <button type="submit" class="btn btn-primary btn-sm editable-submit"><i class="glyphicon glyphicon-ok"></i> save</button>
         #   css-sel: .editable-submit
@@ -668,16 +671,16 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     for single_keyword in keywords_to_insert:
         keyword = single_keyword.strip(" '")
         try:
-            wait_for_obscuring_elements(mydriver)
+            wait_for_obscuring_elements(mydriver, args.verbose)
             keywords_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".select2-search__field")))
             keywords_form.click()
             keywords_form.send_keys(keyword)
             #sleep(2)
-            wait_for_obscuring_elements(mydriver)
+            wait_for_obscuring_elements(mydriver, args.verbose)
             #keyword_sugg = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".select2-results__option")))
             # find the list element, taking care to match the exact text [suggestion from user sefk]:
             keyword_sugg = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.XPATH, f"//li[contains(@class, 'select2-results__option') and text()='{keyword}']")))
-            wait_for_obscuring_elements(mydriver)
+            wait_for_obscuring_elements(mydriver, args.verbose)
             keyword_sugg.click()
         except Exception as e:
             error_msg = f"Problem with keywords: {str(e)}"
@@ -694,12 +697,12 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         #   css-sel: #edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)
         geogr_cov_edit = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)")))
         verbose_print("edit-button geogr_cov_form found", args.verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         geogr_cov_edit.click()
         # form: <input type="text" class="form-control input-sm" style="padding-right: 24px;">
         #   .editable-input > input:nth-child(1)
         geogr_cov_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".editable-input > input:nth-child(1)")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         geogr_cov_form.send_keys(geographic_coverage_text)
         geogr_cov_form.submit()
 
@@ -713,22 +716,22 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         #   #groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)
         time_period_add_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > a:nth-child(3) > span:nth-child(3)")))
         verbose_print("time_period_add_btn found", args.verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         time_period_add_btn.click()
         # start: <input type="text" class="form-control" name="startDate" id="startDate" required="" placeholder="YYYY-MM-DD or YYYY-MM or YYYY" title="Enter as YYYY-MM-DD or YYYY-MM or YYYY" value="" data-reactid=".4.0.0.1.1.0.1.0">
         #   #startDate
         time_period_start = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#startDate")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         time_period_start.send_keys(timeperiod_start_text)
         # <input type="text" class="form-control" name="endDate" id="endDate" placeholder="YYYY-MM-DD or YYYY-MM or YYYY" title="Enter as YYYY-MM-DD or YYYY-MM or YYYY" value="" data-reactid=".4.0.0.1.1.1.1.0">
         #   #endDate
         time_period_end = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#endDate")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         time_period_end.send_keys(timeperiod_end_text)
         # <button type="button" class="btn btn-primary save-dates" data-reactid=".4.0.0.1.1.3.0.0">Save &amp; Apply</button>
         #    .save-dates
         save_time_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".save-dates")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         save_time_btn.click()
 
 
@@ -739,9 +742,9 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         # <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$1.$1.0.$displayPropKey5.$disco_kindOfData_0.1.0.0.0.2.1"> edit</span>
         #   #disco_kindOfData_0 > span:nth-child(2)
         datatypes_edit_btn = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#disco_kindOfData_0 > span:nth-child(2)")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         datatypes_edit_btn.click()
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         # <span> geographic information system (GIS) data</span>  # (there is a space character at the beginning of the string!)
         #   .editable-checklist > div:nth-child(8) > label:nth-child(1) > span:nth-child(2)
         datatype_text = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.XPATH, f"//span[contains(text(), '{datatype_to_select}')]")))
@@ -761,7 +764,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         text_for_collectionnotes = datadict["12_collection_notes"] + " " + downloaddate if len(datadict["12_collection_notes"]) != 0 and datadict["12_collection_notes"] != " " else downloaddate
         # css-sel.: #edit-imeta_collectionNotes_0 > span:nth-child(2)
         coll_notes_edit_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#edit-imeta_collectionNotes_0 > span:nth-child(2)")))
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         coll_notes_edit_btn.click()
         # The WYSIWYG editor is inside an iframe with class "wysihtml5-sandbox"
         #   First, find and switch to the iframe
@@ -782,11 +785,11 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         sleep(0.3)
         # Switch back to default content before clicking save button (which is outside iframe)
         mydriver.switch_to.default_content()
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, args.verbose)
         # css-sel: .editable-submit
         coll_notes_save_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".editable-submit")))
         coll_notes_save_btn.click()
-    
+
     return workspace_id
 
 
@@ -842,7 +845,7 @@ def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, work
         sheet_id: Google Sheet ID (from URL)
         credentials_path: Path to service account credentials JSON file
         sheet_name: Name of the worksheet/tab
-        source_url: Source URL to match against column F
+        source_url: Source URL to match against column G
         workspace_id: Workspace ID for creating download location URL
         datadict: Dictionary containing CSV row data
         username: Username to write in "Claimed" column (default: 'mkraley')
@@ -868,9 +871,9 @@ def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, work
         )
         service = build('sheets', 'v4', credentials=credentials)
         
-        # Find row by matching URL in column F
+        # Find row by matching URL in column G (URL column)
         verbose_print(f"  Searching for URL in sheet: {source_url}", verbose)
-        row_number = find_row_by_url(service, sheet_id, sheet_name, 'F', source_url, verbose)
+        row_number = find_row_by_url(service, sheet_id, sheet_name, 'G', source_url, verbose)
         
         if not row_number:
             error_msg = f"Could not find row with matching URL: {source_url}"
@@ -882,65 +885,65 @@ def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, work
         # Prepare update requests for all columns
         update_requests = []
         
-        # Column A: Claimed (add your name)
+        # Column B: Claimed (add your name)
         update_requests.append({
-            'range': f"{sheet_name}!A{row_number}",
+            'range': f"{sheet_name}!B{row_number}",
             'values': [[username]]
         })
         
-        # Column B: Data Added (Y/N/IP)
+        # Column C: Data Added (Y/N/IP)
         update_requests.append({
-            'range': f"{sheet_name}!B{row_number}",
+            'range': f"{sheet_name}!C{row_number}",
             'values': [['Y']]
         })
         
-        # Column G: Dataset Download Possible?
+        # Column H: Dataset Download Possible?
         update_requests.append({
-            'range': f"{sheet_name}!G{row_number}",
+            'range': f"{sheet_name}!H{row_number}",
             'values': [['Y']]
         })
         
-        # Column I: Nominated to EOT / USGWDA
+        # Column J: Nominated to EOT / USGWDA
         update_requests.append({
-            'range': f"{sheet_name}!I{row_number}",
+            'range': f"{sheet_name}!J{row_number}",
             'values': [['Y']]
         })
         
-        # Column J: Date Downloaded
+        # Column K: Date Downloaded
         download_date = datadict.get("12_download_date_original_source", "").strip()
         if download_date:
             update_requests.append({
-                'range': f"{sheet_name}!J{row_number}",
+                'range': f"{sheet_name}!K{row_number}",
                 'values': [[download_date]]
             })
         
-        # Column K: Download Location
+        # Column L: Download Location
         if workspace_id:
             download_location = f"https://www.datalumos.org/datalumos/project/{workspace_id}/version/V1/view"
             update_requests.append({
-                'range': f"{sheet_name}!K{row_number}",
+                'range': f"{sheet_name}!L{row_number}",
                 'values': [[download_location]]
             })
         
-        # Column L: Dataset Size
+        # Column M: Dataset Size
         dataset_size = datadict.get("dataset_size", "").strip()
         if dataset_size:
             update_requests.append({
-                'range': f"{sheet_name}!L{row_number}",
+                'range': f"{sheet_name}!M{row_number}",
                 'values': [[dataset_size]]
             })
         
-        # Column M: File extensions of data uploads
+        # Column N: File extensions of data uploads
         file_extensions = datadict.get("file_extensions", "").strip()
         if file_extensions:
             update_requests.append({
-                'range': f"{sheet_name}!M{row_number}",
+                'range': f"{sheet_name}!N{row_number}",
                 'values': [[file_extensions]]
             })
         
-        # Column N: Metadata availability info
+        # Column O: Metadata availability info
         update_requests.append({
-            'range': f"{sheet_name}!N{row_number}",
+            'range': f"{sheet_name}!O{row_number}",
             'values': [['Y']]
         })
         
@@ -996,7 +999,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Publish Project')]"))
         )
         verbose_print("Found 'Publish Project' button", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         publish_project_btn.click()
         
         # Wait for navigation to review/publish page
@@ -1012,7 +1015,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Proceed to Publish')]"))
         )
         verbose_print("Found 'Proceed to Publish' button", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         proceed_publish_btn.click()
         sleep(1)
         
@@ -1022,7 +1025,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.ID, "noDisclosure"))
         )
         verbose_print("Found 'noDisclosure' radio button", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         no_disclosure_radio.click()
         sleep(0.5)
         
@@ -1031,7 +1034,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.ID, "sensitiveNo"))
         )
         verbose_print("Found 'sensitiveNo' radio button", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         sensitive_no_radio.click()
         sleep(0.5)
         
@@ -1040,7 +1043,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.ID, "depositAgree"))
         )
         verbose_print("Found 'depositAgree' checkbox", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         deposit_agree_checkbox.click()
         sleep(0.5)
         
@@ -1050,7 +1053,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Publish Data')]"))
         )
         verbose_print("Found 'Publish Data' button", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         publish_data_btn.click()
         sleep(2)
         
@@ -1060,7 +1063,7 @@ def publish_workspace(mydriver, verbose=False):
             EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'btn-primary') and contains(., 'Back to Project')]"))
         )
         verbose_print("Found 'Back to Project' button", verbose)
-        wait_for_obscuring_elements(mydriver)
+        wait_for_obscuring_elements(mydriver, verbose)
         back_to_project_btn.click()
         sleep(2)
         
@@ -1141,7 +1144,7 @@ def main():
                     workspace_url = f"https://www.datalumos.org/datalumos/workspace?goToPath=/datalumos/{workspace_id}&goToLevel=project"
                     verbose_print(f"Navigating to workspace: {workspace_url}", args.verbose)
                     mydriver.get(workspace_url)
-                    wait_for_obscuring_elements(mydriver)
+                    wait_for_obscuring_elements(mydriver, args.verbose)
                     sleep(2)
                     verbose_print(f"Processing row {current_row} (only-publish mode), Workspace ID: {workspace_id}\n", args.verbose)
                 else:
