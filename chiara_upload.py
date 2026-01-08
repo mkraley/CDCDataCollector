@@ -81,10 +81,10 @@ Examples:
                         help='Path to the folder where upload files are located (subfolders for each project should be in here)')
     
     parser.add_argument('--username', default=None,
-                        help='Username/email for automated login (if not provided, manual login will be required)')
+                        help='Username/email for automated login to DataLumos (if not provided, manual login will be required)')
     
     parser.add_argument('--password', default=None,
-                        help='Password for automated login (if not provided, manual login will be required)')
+                        help='Password for automated login to DataLumos (if not provided, manual login will be required)')
     
     parser.add_argument('--browser', choices=['chrome', 'chromium', 'firefox'], default='chrome',
                         help='Browser to use: chrome/chromium or firefox (default: chrome)')
@@ -106,6 +106,15 @@ Examples:
     
     parser.add_argument('--google-username', default='mkraley',
                         help='Username to write in the "Claimed" column (default: mkraley)')
+    
+    parser.add_argument('--GWDA-your-name', dest='gwda_your_name', default='Michael Kraley',
+                        help='Name to enter in GWDA nomination form (default: Michael Kraley)')
+    
+    parser.add_argument('--GWDA-institution', dest='gwda_institution', default='Data Rescue Project',
+                        help='Institution to enter in GWDA nomination form (default: Data Rescue Project)')
+    
+    parser.add_argument('--GWDA-email', dest='gwda_email', default=None,
+                        help='Email to enter in GWDA nomination form (default: uses --username value if provided)')
     
     return parser.parse_args()
 
@@ -307,11 +316,7 @@ def sign_in(driver, username=None, password=None):
             input("Press Enter after you have completed the login...")
             print("Continuing with script execution...\n")
         
-        # Navigate to workspace after sign-in
-        print("Navigating to workspace...")
-        driver.get("https://www.datalumos.org/datalumos/workspace")
-        wait_for_verification(driver)
-        
+       
         return True, "Successfully signed in"
     
     except Exception as e:
@@ -320,7 +325,7 @@ def sign_in(driver, username=None, password=None):
         return False, error_msg
 
 
-def wait_for_obscuring_elements(current_driver_obj, verbose=False):
+def wait_for_obscuring_elements(current_driver_obj, verbose):
     overlays = current_driver_obj.find_elements(By.ID, "busy")  # caution: find_elements, not find_element
     if len(overlays) != 0:  # there is an overlay
         verbose_print(f"... (Waiting for overlay to disappear. Overlay(s): {overlays})", verbose)
@@ -404,24 +409,43 @@ def update_csv_workspace_id(csv_file_path, row_number, workspace_id):
         row_number: Row number (1-indexed, excluding header)
         workspace_id: Workspace ID to write
     """
-    try:
-        # Read the CSV file
-        df = pd.read_csv(csv_file_path)
-        
-        # Ensure datalumos_id column exists and is string type
-        if 'datalumos_id' not in df.columns:
-            df['datalumos_id'] = ''
-        
-        # Convert column to string type to avoid dtype warnings
-        df['datalumos_id'] = df['datalumos_id'].astype(str)
-        
-        # Update the specific row (row_number is 1-indexed, excluding header, so it maps to index row_number - 1)
-        df.loc[row_number - 1, 'datalumos_id'] = str(workspace_id)
-        
-        # Write back to CSV
-        df.to_csv(csv_file_path, index=False)
-    except Exception as e:
-        print(f"⚠ Warning: Could not update CSV file with workspace ID: {e}")
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Read the CSV file
+            df = pd.read_csv(csv_file_path)
+            
+            # Ensure datalumos_id column exists and is string type
+            if 'datalumos_id' not in df.columns:
+                df['datalumos_id'] = ''
+            
+            # Convert column to string type to avoid dtype warnings
+            df['datalumos_id'] = df['datalumos_id'].astype(str)
+            
+            # Update the specific row (row_number is 1-indexed, excluding header, so it maps to index row_number - 1)
+            df.loc[row_number - 1, 'datalumos_id'] = str(workspace_id)
+            
+            # Write back to CSV
+            df.to_csv(csv_file_path, index=False)
+            return  # Success, exit the function
+        except (PermissionError, IOError, OSError) as e:
+            # File is likely open in another program (Excel, etc.)
+            retry_count += 1
+            if retry_count < max_retries:
+                print(f"\n⚠ WARNING: Could not write to CSV file: {csv_file_path}")
+                print(f"   Error: {str(e)}")
+                print(f"   Please close the file if it's open in Excel or another program.")
+                input("   Press Enter after closing the file to retry...")
+            else:
+                print(f"\n⚠ WARNING: Could not update CSV file after {max_retries} attempts: {csv_file_path}")
+                print(f"   Error: {str(e)}")
+                print(f"   Please manually update row {row_number} with workspace ID: {workspace_id}")
+        except Exception as e:
+            # Other errors - don't retry, just report
+            print(f"⚠ Warning: Could not update CSV file with workspace ID: {e}")
+            return
 
 
 def verbose_print(message, verbose=False):
@@ -453,6 +477,12 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     workspace_id = None
     
     # Normal mode: create project and fill forms
+    
+    # Navigate to workspace page
+    verbose_print("Navigating to workspace...", args.verbose)
+    mydriver.get("https://www.datalumos.org/datalumos/workspace")
+    wait_for_verification(mydriver)
+    
     new_project_btn = WebDriverWait(mydriver, 360).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn > span:nth-child(3)"))) # .btn > span:nth-child(3)
     verbose_print("button found", args.verbose)
     wait_for_obscuring_elements(mydriver, args.verbose)
@@ -793,7 +823,103 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     return workspace_id
 
 
-def find_row_by_url(service, sheet_id, sheet_name, url_column, source_url, verbose=False):
+def column_index_to_letter(col_index):
+    """
+    Convert a 1-based column index to a column letter (e.g., 1 -> A, 2 -> B, 27 -> AA).
+    
+    Args:
+        col_index: 1-based column index
+    
+    Returns:
+        Column letter (e.g., 'A', 'B', 'AA')
+    """
+    result = ""
+    while col_index > 0:
+        col_index -= 1
+        result = chr(65 + (col_index % 26)) + result
+        col_index //= 26
+    return result
+
+
+def get_column_mapping(service, sheet_id, sheet_name, required_columns, verbose=False):
+    """
+    Read the first row of a Google Sheet and create a mapping from column names to column letters.
+    
+    Args:
+        service: Google Sheets API service object
+        sheet_id: Google Sheet ID
+        sheet_name: Name of the worksheet/tab
+        required_columns: List of required column names to find
+        verbose: Whether to print verbose messages
+    
+    Returns:
+        Dictionary mapping column names to column letters (e.g., {'URL': 'G', 'Claimed': 'B'})
+        Returns None if a required column is missing
+    """
+    try:
+        # Read the first row (header row)
+        range_name = f"{sheet_name}!1:1"
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=range_name
+        ).execute()
+        
+        values = result.get('values', [])
+        if not values or len(values) == 0:
+            return None
+        
+        header_row = values[0]
+        
+        # Create mapping from column name to column letter
+        column_map = {}
+        for idx, col_name in enumerate(header_row):
+            if col_name and str(col_name).strip():
+                col_letter = column_index_to_letter(idx + 1)
+                column_map[str(col_name).strip()] = col_letter
+                verbose_print(f"  Found column '{col_name}' at {col_letter}", verbose)
+        
+        # Check for required columns (case-insensitive, partial match)
+        missing_columns = []
+        found_columns = {}
+        
+        for required_col in required_columns:
+            found = False
+            # Try exact match first (case-insensitive)
+            for col_name, col_letter in column_map.items():
+                if col_name.lower() == required_col.lower():
+                    found_columns[required_col] = col_letter
+                    found = True
+                    break
+            
+            # Try partial match if exact match not found
+            if not found:
+                for col_name, col_letter in column_map.items():
+                    if required_col.lower() in col_name.lower() or col_name.lower() in required_col.lower():
+                        found_columns[required_col] = col_letter
+                        found = True
+                        break
+            
+            if not found:
+                missing_columns.append(required_col)
+        
+        if missing_columns:
+            error_msg = f"\n✗ ERROR: Required columns not found in Google Sheet '{sheet_name}':\n"
+            for col in missing_columns:
+                error_msg += f"   - {col}\n"
+            error_msg += f"\nAvailable columns in the sheet:\n"
+            for col_name, col_letter in sorted(column_map.items()):
+                error_msg += f"   - {col_name} ({col_letter})\n"
+            print(error_msg)
+            raise ValueError(f"Required columns missing from Google Sheet '{sheet_name}'. See error message above.")
+        
+        return found_columns
+        
+    except Exception as e:
+        print(f"✗ ERROR: Failed to read column headers from Google Sheet: {str(e)}")
+        return None
+
+
+def find_row_by_url(service, sheet_id, sheet_name, url_column_letter, source_url, verbose=False):
     """
     Find the row number in Google Sheet by matching URL in the specified column.
     
@@ -801,7 +927,7 @@ def find_row_by_url(service, sheet_id, sheet_name, url_column, source_url, verbo
         service: Google Sheets API service object
         sheet_id: Google Sheet ID
         sheet_name: Name of the worksheet/tab
-        url_column: Column letter containing URLs (e.g., "F")
+        url_column_letter: Column letter containing URLs (e.g., "G")
         source_url: URL to search for
         verbose: Whether to print verbose messages
     
@@ -810,7 +936,7 @@ def find_row_by_url(service, sheet_id, sheet_name, url_column, source_url, verbo
     """
     try:
         # Read all values from the URL column (starting from row 2 to skip header)
-        range_name = f"{sheet_name}!{url_column}2:{url_column}"
+        range_name = f"{sheet_name}!{url_column_letter}2:{url_column_letter}"
         result = service.spreadsheets().values().get(
             spreadsheetId=sheet_id,
             range=range_name
@@ -840,12 +966,13 @@ def find_row_by_url(service, sheet_id, sheet_name, url_column, source_url, verbo
 def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, workspace_id, datadict, username='mkraley', verbose=False):
     """
     Update a Google Sheet with publishing results by finding row via URL match.
+    Uses column names from the first row instead of fixed column positions.
     
     Args:
         sheet_id: Google Sheet ID (from URL)
         credentials_path: Path to service account credentials JSON file
         sheet_name: Name of the worksheet/tab
-        source_url: Source URL to match against column G
+        source_url: Source URL to match against URL column
         workspace_id: Workspace ID for creating download location URL
         datadict: Dictionary containing CSV row data
         username: Username to write in "Claimed" column (default: 'mkraley')
@@ -871,9 +998,38 @@ def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, work
         )
         service = build('sheets', 'v4', credentials=credentials)
         
-        # Find row by matching URL in column G (URL column)
-        verbose_print(f"  Searching for URL in sheet: {source_url}", verbose)
-        row_number = find_row_by_url(service, sheet_id, sheet_name, 'G', source_url, verbose)
+        # Define required columns with their search names
+        required_columns = [
+            'URL',  # Column to match source_url against
+            'Claimed',  # or "Claimed (add your name)"
+            'Data Added',  # or "Data Added (Y/N/IP)"
+            'Dataset Download Possible?',
+            'Nominated to EOT / USGWDA',  # or "Nominated"
+            'Date Downloaded',
+            'Download Location',
+            'Dataset Size',
+            'File extensions of data uploads',  # or "File extensions"
+            'Metadata availability info'  # or "Metadata"
+        ]
+        
+        # Get column mapping from sheet headers
+        verbose_print(f"  Reading column headers from sheet '{sheet_name}'...", verbose)
+        column_map = get_column_mapping(service, sheet_id, sheet_name, required_columns, verbose)
+        
+        if not column_map:
+            error_msg = "Failed to get column mapping from Google Sheet. Check column names."
+            print(f"\n✗ {error_msg}")
+            return False, error_msg
+        
+        # Find row by matching URL
+        url_col_letter = column_map.get('URL')
+        if not url_col_letter:
+            error_msg = "Could not find URL column in sheet"
+            print(f"\n✗ {error_msg}")
+            return False, error_msg
+        
+        verbose_print(f"  Searching for URL in column {url_col_letter}: {source_url}", verbose)
+        row_number = find_row_by_url(service, sheet_id, sheet_name, url_col_letter, source_url, verbose)
         
         if not row_number:
             error_msg = f"Could not find row with matching URL: {source_url}"
@@ -885,67 +1041,84 @@ def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, work
         # Prepare update requests for all columns
         update_requests = []
         
-        # Column B: Claimed (add your name)
-        update_requests.append({
-            'range': f"{sheet_name}!B{row_number}",
-            'values': [[username]]
-        })
-        
-        # Column C: Data Added (Y/N/IP)
-        update_requests.append({
-            'range': f"{sheet_name}!C{row_number}",
-            'values': [['Y']]
-        })
-        
-        # Column H: Dataset Download Possible?
-        update_requests.append({
-            'range': f"{sheet_name}!H{row_number}",
-            'values': [['Y']]
-        })
-        
-        # Column J: Nominated to EOT / USGWDA
-        update_requests.append({
-            'range': f"{sheet_name}!J{row_number}",
-            'values': [['Y']]
-        })
-        
-        # Column K: Date Downloaded
-        download_date = datadict.get("12_download_date_original_source", "").strip()
-        if download_date:
+        # Claimed (add your name)
+        claimed_col = column_map.get('Claimed')
+        if claimed_col:
             update_requests.append({
-                'range': f"{sheet_name}!K{row_number}",
-                'values': [[download_date]]
+                'range': f"{sheet_name}!{claimed_col}{row_number}",
+                'values': [[username]]
             })
         
-        # Column L: Download Location
-        if workspace_id:
+        # Data Added (Y/N/IP)
+        data_added_col = column_map.get('Data Added')
+        if data_added_col:
+            update_requests.append({
+                'range': f"{sheet_name}!{data_added_col}{row_number}",
+                'values': [['Y']]
+            })
+        
+        # Dataset Download Possible?
+        download_possible_col = column_map.get('Dataset Download Possible?')
+        if download_possible_col:
+            update_requests.append({
+                'range': f"{sheet_name}!{download_possible_col}{row_number}",
+                'values': [['Y']]
+            })
+        
+        # Nominated to EOT / USGWDA
+        nominated_col = column_map.get('Nominated to EOT / USGWDA')
+        if nominated_col:
+            update_requests.append({
+                'range': f"{sheet_name}!{nominated_col}{row_number}",
+                'values': [['Y']]
+            })
+        
+        # Date Downloaded
+        date_downloaded_col = column_map.get('Date Downloaded')
+        if date_downloaded_col:
+            download_date = datadict.get("12_download_date_original_source", "").strip()
+            if download_date:
+                update_requests.append({
+                    'range': f"{sheet_name}!{date_downloaded_col}{row_number}",
+                    'values': [[download_date]]
+                })
+        
+        # Download Location
+        download_location_col = column_map.get('Download Location')
+        if download_location_col and workspace_id:
             download_location = f"https://www.datalumos.org/datalumos/project/{workspace_id}/version/V1/view"
             update_requests.append({
-                'range': f"{sheet_name}!L{row_number}",
+                'range': f"{sheet_name}!{download_location_col}{row_number}",
                 'values': [[download_location]]
             })
         
-        # Column M: Dataset Size
-        dataset_size = datadict.get("dataset_size", "").strip()
-        if dataset_size:
-            update_requests.append({
-                'range': f"{sheet_name}!M{row_number}",
-                'values': [[dataset_size]]
-            })
+        # Dataset Size
+        dataset_size_col = column_map.get('Dataset Size')
+        if dataset_size_col:
+            dataset_size = datadict.get("dataset_size", "").strip()
+            if dataset_size:
+                update_requests.append({
+                    'range': f"{sheet_name}!{dataset_size_col}{row_number}",
+                    'values': [[dataset_size]]
+                })
         
-        # Column N: File extensions of data uploads
-        file_extensions = datadict.get("file_extensions", "").strip()
-        if file_extensions:
-            update_requests.append({
-                'range': f"{sheet_name}!N{row_number}",
-                'values': [[file_extensions]]
-            })
+        # File extensions of data uploads
+        file_extensions_col = column_map.get('File extensions of data uploads')
+        if file_extensions_col:
+            file_extensions = datadict.get("file_extensions", "").strip()
+            if file_extensions:
+                update_requests.append({
+                    'range': f"{sheet_name}!{file_extensions_col}{row_number}",
+                    'values': [[file_extensions]]
+                })
         
-        # Column O: Metadata availability info
-        update_requests.append({
-            'range': f"{sheet_name}!O{row_number}",
-            'values': [['Y']]
-        })
+        # Metadata availability info
+        metadata_col = column_map.get('Metadata availability info')
+        if metadata_col:
+            update_requests.append({
+                'range': f"{sheet_name}!{metadata_col}{row_number}",
+                'values': [['Y']]
+            })
         
         if not update_requests:
             return False, "No data to update"
@@ -964,6 +1137,9 @@ def update_google_sheet(sheet_id, credentials_path, sheet_name, source_url, work
         verbose_print(f"✓ Successfully updated Google Sheet row {row_number} with {len(update_requests)} columns", verbose)
         return True, None
         
+    except ValueError:
+        # Re-raise ValueError (missing columns) to stop execution
+        raise
     except FileNotFoundError:
         error_msg = f"Credentials file not found: {credentials_path}"
         verbose_print(f"⚠ {error_msg}", verbose)
@@ -1082,6 +1258,97 @@ def publish_workspace(mydriver, verbose=False):
         return False, error_msg
 
 
+def nominate_url_to_gwda(mydriver, source_url, your_name, institution, email, verbose=False):
+    """
+    Nominate a URL to the U.S. Government Web & Data Archive (GWDA).
+    
+    Args:
+        mydriver: WebDriver instance
+        source_url: The URL to nominate
+        your_name: Name to enter in the nomination form
+        institution: Institution to enter in the nomination form
+        email: Email address to enter in the nomination form
+        verbose: Whether to print verbose messages
+    
+    Returns:
+        Tuple of (success: bool, error_message: str or None)
+    """
+    if not source_url or source_url.strip() == "":
+        return False, "Source URL is empty, cannot nominate"
+    
+    verbose_print(f"\nNominating URL to GWDA: {source_url}", verbose)
+    
+    try:
+        # Navigate to the nomination page
+        nomination_url = "https://digital2.library.unt.edu/nomination/GWDA-US-2025/add/"
+        verbose_print(f"Navigating to: {nomination_url}", verbose)
+        mydriver.get(nomination_url)
+        sleep(2)
+        
+        # Find and fill in the URL input field
+        # <input type="text" name="url_value" id="url-value" class="form-control" required="" ...>
+        url_input = WebDriverWait(mydriver, 30).until(
+            EC.presence_of_element_located((By.ID, "url-value"))
+        )
+        verbose_print("Found URL input field", verbose)
+        url_input.clear()
+        url_input.send_keys(source_url)
+        verbose_print(f"Entered URL: {source_url}", verbose)
+        sleep(0.5)
+        
+        # Find and fill in the "Your Name" field
+        # <input type="text" name="nominator_name" id="your-name-value" class="form-control" ...>
+        name_input = WebDriverWait(mydriver, 30).until(
+            EC.presence_of_element_located((By.ID, "your-name-value"))
+        )
+        verbose_print("Found 'Your Name' input field", verbose)
+        name_input.clear()
+        name_input.send_keys(your_name)
+        verbose_print(f"Entered name: {your_name}", verbose)
+        sleep(0.5)
+        
+        # Find and fill in the "Institution" field
+        # <input type="text" name="nominator_institution" id="institution-value" class="form-control" ...>
+        institution_input = WebDriverWait(mydriver, 30).until(
+            EC.presence_of_element_located((By.ID, "institution-value"))
+        )
+        verbose_print("Found 'Institution' input field", verbose)
+        institution_input.clear()
+        institution_input.send_keys(institution)
+        verbose_print(f"Entered institution: {institution}", verbose)
+        sleep(0.5)
+        
+        # Find and fill in the "Email" field
+        # <input type="text" name="nominator_email" id="email-value" class="form-control" ...>
+        email_input = WebDriverWait(mydriver, 30).until(
+            EC.presence_of_element_located((By.ID, "email-value"))
+        )
+        verbose_print("Found 'Email' input field", verbose)
+        email_input.clear()
+        email_input.send_keys(email)
+        verbose_print(f"Entered email: {email}", verbose)
+        sleep(0.5)
+        
+        # Find and click the submit button
+        # <input type="submit" value="submit" class="btn btn-primary" ...>
+        submit_btn = WebDriverWait(mydriver, 30).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='submit'][value='submit']"))
+        )
+        verbose_print("Found submit button", verbose)
+        wait_for_obscuring_elements(mydriver, verbose)
+        submit_btn.click()
+        sleep(2)
+        
+        verbose_print("✓ Successfully nominated URL to GWDA", verbose)
+        return True, None
+        
+    except Exception as e:
+        error_msg = f"Error nominating URL to GWDA: {str(e)}"
+        verbose_print(f"⚠ {error_msg}", verbose)
+        verbose_print(traceback.format_exc(), verbose)
+        return False, error_msg
+
+
 
 def main():
     """Main execution function."""
@@ -1179,6 +1446,9 @@ def main():
                             error_msg = f"Google Sheet update failed: {gsheet_error}"
                             row_errors.append(error_msg)
                             verbose_print(f"⚠ {error_msg}", args.verbose)
+                    except ValueError:
+                        # Missing required columns - stop execution
+                        raise
                     except Exception as e:
                         error_msg = f"Error updating Google Sheet: {str(e)}"
                         row_errors.append(error_msg)
@@ -1194,6 +1464,32 @@ def main():
                         error_msg = f"Failed to update CSV with workspace ID: {str(e)}"
                         row_errors.append(error_msg)
                         verbose_print(f"⚠ {error_msg}", args.verbose)
+                
+                # Nominate URL to GWDA (U.S. Government Web & Data Archive)
+                if source_url:
+                    try:
+                        # Use args.username as default for GWDA email if not provided
+                        gwda_email = args.gwda_email if args.gwda_email else args.username
+                        if not gwda_email:
+                            row_warnings.append("GWDA nomination skipped: No email provided (neither --GWDA-email nor --username)")
+                            verbose_print("⚠ GWDA nomination skipped: No email provided", args.verbose)
+                        else:
+                            gwda_success, gwda_error = nominate_url_to_gwda(
+                                mydriver, 
+                                source_url, 
+                                args.gwda_your_name,
+                                args.gwda_institution,
+                                gwda_email,
+                                args.verbose
+                            )
+                            if not gwda_success:
+                                row_warnings.append(f"GWDA nomination failed: {gwda_error}")
+                                verbose_print(f"⚠ GWDA nomination failed: {gwda_error}", args.verbose)
+                    except Exception as e:
+                        error_msg = f"Error nominating URL to GWDA: {str(e)}"
+                        row_warnings.append(error_msg)
+                        verbose_print(f"⚠ {error_msg}", args.verbose)
+                        verbose_print(traceback.format_exc(), args.verbose)
                 
                 # Print summary line (non-verbose mode) or detailed output (verbose mode)
                 if not args.verbose:

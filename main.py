@@ -98,16 +98,18 @@ def sanitize_folder_name(name, max_length=100):
     invalid_chars = r'[<>:"/\\|?*]'
     sanitized = re.sub(invalid_chars, '_', str(name))
     
-    # Remove leading/trailing dots and spaces (Windows doesn't allow these)
-    sanitized = sanitized.strip('. ')
-    
     # Remove control characters
     sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
+    
+    # Remove leading/trailing dots and spaces (Windows doesn't allow these)
+    sanitized = sanitized.strip('. ')
     
     # Limit length to avoid Windows path issues
     # Windows has 260 char path limit, so keep folder names shorter
     if len(sanitized) > max_length:
         sanitized = sanitized[:max_length]
+        # Strip again after truncation in case truncation left trailing spaces
+        sanitized = sanitized.strip('. ')
     
     # If empty after sanitization, use default
     if not sanitized:
@@ -548,7 +550,7 @@ def download_dataset(page, output_path, timeout=60000):
         timeout: Timeout in milliseconds (default: 60 seconds)
     
     Returns:
-        Tuple of (success: bool, status_message: str)
+        Tuple of (success: bool, status_message: str, file_extension: str or None)
     """
     try:
         # Find and click Export button using Playwright Python API
@@ -568,16 +570,28 @@ def download_dataset(page, output_path, timeout=60000):
                 continue
         
         if export_button is None:
-            return False, 'Export button not found'
+            return False, 'Export button not found', None
         
         try:
             export_button.scroll_into_view_if_needed()
             export_button.click()
         except Exception as e:
-            return False, f'Could not click Export button: {str(e)}'
+            return False, f'Could not click Export button: {str(e)}', None
         
         # Wait for dialog to appear
         page.wait_for_timeout(1000)
+        
+        # Check for large dataset warning before attempting download
+        try:
+            warning_element = page.locator('div.message-title[slot="title"]')
+            warning_count = warning_element.count()
+            if warning_count > 0:
+                warning_text = warning_element.first.inner_text().strip()
+                if 'Large dataset warning' in warning_text:
+                    return False, 'Large dataset warning - download skipped', None
+        except Exception:
+            # If we can't check for the warning, continue with download attempt
+            pass
         
         # Set up download listener before clicking Download
         with page.expect_download(timeout=timeout) as download_info:
@@ -616,24 +630,41 @@ def download_dataset(page, output_path, timeout=60000):
                         break
             
             if download_button is None:
-                return False, 'Download button with exact label "Download" not found in dialog'
+                return False, 'Download button with exact label "Download" not found in dialog', None
             
             try:
                 download_button.scroll_into_view_if_needed()
                 download_button.click()
             except Exception as e:
-                return False, f'Could not click Download button: {str(e)}'
+                return False, f'Could not click Download button: {str(e)}', None
         
         # Wait for download to complete and save the file
         download = download_info.value
+        
+        # Get the original suggested filename to detect file extension
+        suggested_filename = download.suggested_filename()
+        file_extension = None
+        if suggested_filename:
+            # Extract extension from suggested filename
+            ext_with_dot = Path(suggested_filename).suffix
+            if ext_with_dot:
+                # Remove the leading dot
+                file_extension = ext_with_dot[1:].lower()
+        
         download.save_as(output_path)
         
-        return True, f"Dataset downloaded: {output_path.name}"
+        # If we couldn't detect extension from suggested filename, try from saved file
+        if file_extension is None and output_path.exists():
+            ext_with_dot = output_path.suffix
+            if ext_with_dot:
+                file_extension = ext_with_dot[1:].lower()
+        
+        return True, f"Dataset downloaded: {output_path.name}", file_extension
     
     except PlaywrightTimeoutError:
-        return False, "Timeout waiting for download (check if Export/Download buttons work)"
+        return False, "Timeout waiting for download (check if Export/Download buttons work)", None
     except Exception as e:
-        return False, f"Error downloading dataset: {str(e)[:100]}"
+        return False, f"Error downloading dataset: {str(e)[:100]}", None
 
 
 def get_source_data(row, url_source_col, title_source_col, office_source_col, agency_source_col):
@@ -821,7 +852,7 @@ def convert_source_to_pdf(url, pdf_path, timeout=120000, headless=True, verbose=
 
 
 def process_row(row, url_source_col, title_source_col, office_source_col, agency_source_col,
-                base_data_dir, output_df, output_file, output_columns, headless=True, verbose=False, idx=None, total=None):
+                base_data_dir, output_df, output_file, output_columns, headless=True, verbose=False, ordinal=None, total=None, spreadsheet_row=None):
     """
     Process a single row from the source sheet.
     
@@ -837,8 +868,9 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         output_columns: List of output column names
         headless: If False, run browser in visible mode for debugging
         verbose: If True, show detailed logging
-        idx: Row index for logging (optional)
-        total: Total number of rows for logging (optional)
+        ordinal: Ordinal number (1-based) of dataset in current batch (optional)
+        total: Total number of rows in batch for logging (optional)
+        spreadsheet_row: Original spreadsheet row index (optional)
     
     Returns:
         Updated output_df
@@ -870,7 +902,10 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         if verbose:
             print(f"  ✗ Status: Invalid URL")
         else:
-            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            if ordinal is not None and total is not None and spreadsheet_row is not None:
+                idx_str = f"[{ordinal}/{total} row: {spreadsheet_row}] "
+            else:
+                idx_str = ""
             print(f"{idx_str}{url} - Invalid URL")
         output_df = update_output_data(output_df, new_row, output_file)
         return output_df
@@ -884,7 +919,10 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         if verbose:
             print(f"  ✗ Status: {status_msg}")
         else:
-            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            if ordinal is not None and total is not None and spreadsheet_row is not None:
+                idx_str = f"[{ordinal}/{total} row: {spreadsheet_row}] "
+            else:
+                idx_str = ""
             print(f"{idx_str}{url} - {status_msg}")
         output_df = update_output_data(output_df, new_row, output_file)
         return output_df
@@ -913,7 +951,7 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
             print(f"  ✓ PDF saved: {pdf_path}")
         
         # Download dataset
-        download_success, download_status = download_dataset(page, dataset_path, timeout=60000)
+        download_success, download_status, dataset_extension = download_dataset(page, dataset_path, timeout=60000)
         if download_success:
             if verbose:
                 print(f"  ✓ {download_status}")
@@ -934,15 +972,28 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         # Get keywords from metadata table
         keywords = get_keywords(page)
         
+        # Determine file extensions: PDF + detected dataset extension, or just PDF if download failed/skipped
+        if download_success and dataset_extension:
+            file_extensions = f"PDF, {dataset_extension}"
+        elif download_success:
+            # Download succeeded but couldn't detect extension, default to csv
+            file_extensions = "PDF, csv"
+        else:
+            # Download failed or was skipped, only PDF available
+            file_extensions = "PDF"
+        
         # Update output row with dataset information
         new_row['dataset_rows'] = metadata_rows
         new_row['dataset_cols'] = metadata_columns
         new_row['dataset_size'] = format_file_size(dataset_size) if dataset_size is not None else None
+        new_row['file_extensions'] = file_extensions
         new_row['6_summary_description'] = description
         new_row['8_keywords'] = keywords
         
         # Combine status messages
         status_parts = [base_status, pdf_status]
+        if not download_success:
+            status_parts.append(download_status)
         new_row['Status'] = "; ".join(status_parts)
         
         # Log success (normal or verbose mode)
@@ -952,7 +1003,10 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
             if dataset_size is not None:
                 print(f"  Dataset size: {format_file_size(dataset_size)}")
         else:
-            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            if ordinal is not None and total is not None and spreadsheet_row is not None:
+                idx_str = f"[{ordinal}/{total} row: {spreadsheet_row}] "
+            else:
+                idx_str = ""
             rows_str = metadata_rows if metadata_rows else "?"
             cols_str = metadata_columns if metadata_columns else "?"
             size_str = format_file_size(dataset_size) if dataset_size is not None else "unknown"
@@ -972,7 +1026,10 @@ def process_row(row, url_source_col, title_source_col, office_source_col, agency
         if verbose:
             print(f"  ✗ Error: {e}")
         else:
-            idx_str = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+            if ordinal is not None and total is not None and spreadsheet_row is not None:
+                idx_str = f"[{ordinal}/{total} row: {spreadsheet_row}] "
+            else:
+                idx_str = ""
             print(f"{idx_str}{url} - Error: {e}")
     finally:
         if browser:
@@ -1053,13 +1110,13 @@ def process_rows(source_file, output_file, start_row=0, num_rows=None, headless=
         print("DEBUG MODE: Browser will be visible")
     
     # Process each row
-    for idx, (i, row) in enumerate(rows_to_process.iterrows(), start=start_row):
+    for ordinal, (spreadsheet_row, row) in enumerate(rows_to_process.iterrows(), start=1):
         if verbose:
-            print(f"\n[{i+1}/{len(rows_to_process)}] Processing row {idx}...")
+            print(f"\n[{ordinal}/{len(rows_to_process)} row: {spreadsheet_row}] Processing row {spreadsheet_row}...")
         output_df = process_row(
             row, url_source_col, title_source_col, office_source_col, agency_source_col,
             base_data_dir, output_df, output_file, output_columns, headless=headless,
-            verbose=verbose, idx=idx, total=len(rows_to_process)
+            verbose=verbose, ordinal=ordinal, total=len(rows_to_process), spreadsheet_row=spreadsheet_row
         )
     
     # Cleanup: Print summary
