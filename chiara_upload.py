@@ -1371,9 +1371,7 @@ def main():
         else:
             print(f"✓ {signin_message}\n")
 
-        verbose_print("If you upload from USB device: MAKE SURE THE USB IS PLUGGED IN!\n", args.verbose)
-        if not args.verbose:
-            print("If you upload from USB device: MAKE SURE THE USB IS PLUGGED IN!\n")
+        print("If you upload from USB device: MAKE SURE THE USB IS PLUGGED IN!\n")
 
         # Calculate batch information
         total_rows = args.end_row - args.start_row + 1
