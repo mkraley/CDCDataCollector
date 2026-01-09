@@ -14,6 +14,7 @@ import time
 import re
 import os
 import shutil
+import unicodedata
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
@@ -52,7 +53,9 @@ def get_filtered_rows(source_file):
     """
     print(f"Reading source sheet: {source_file}")
     try:
-        df = pd.read_excel(source_file)
+        # Read Excel file with proper encoding handling
+        # pandas read_excel should preserve Unicode, but we ensure it by not specifying engine
+        df = pd.read_excel(source_file, engine=None)
     except FileNotFoundError:
         print(f"Error: File not found: {source_file}")
         sys.exit(1)
@@ -94,22 +97,64 @@ def sanitize_folder_name(name, max_length=100):
     if not name:
         return "Untitled"
     
+    # Convert to string and handle encoding issues
+    try:
+        # Try to decode if it's bytes, or normalize if it's a string with encoding issues
+        if isinstance(name, bytes):
+            sanitized = name.decode('utf-8', errors='replace')
+        else:
+            sanitized = str(name)
+            # Normalize Unicode characters (e.g., convert em dashes to regular dashes)
+            sanitized = unicodedata.normalize('NFKD', sanitized)
+    except Exception:
+        # Fallback: just convert to string
+        sanitized = str(name)
+    
+    # Replace common problematic Unicode characters with ASCII equivalents
+    replacements = {
+        '\u2013': '-',  # en dash
+        '\u2014': '-',  # em dash
+        '\u2018': "'",  # left single quotation mark
+        '\u2019': "'",  # right single quotation mark
+        '\u201C': '"',  # left double quotation mark
+        '\u201D': '"',  # right double quotation mark
+        '\u2026': '...',  # ellipsis
+        '\u00A0': ' ',  # non-breaking space
+    }
+    for old_char, new_char in replacements.items():
+        sanitized = sanitized.replace(old_char, new_char)
+    
     # Remove invalid Windows characters: < > : " / \ | ? *
     invalid_chars = r'[<>:"/\\|?*]'
-    sanitized = re.sub(invalid_chars, '_', str(name))
+    sanitized = re.sub(invalid_chars, '_', sanitized)
     
     # Remove control characters
     sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
     
+    # Remove or replace remaining non-ASCII characters that might cause issues
+    # For Windows compatibility, convert remaining non-ASCII to ASCII-safe equivalents
+    try:
+        # Encode to ASCII, replacing non-ASCII characters with '?' (replacement character)
+        sanitized = sanitized.encode('ascii', errors='replace').decode('ascii')
+        # Replace any '?' characters (from ASCII encoding replacement) with underscore
+        sanitized = sanitized.replace('?', '_')
+    except Exception:
+        # If encoding fails, just remove non-ASCII
+        sanitized = ''.join(c if ord(c) < 128 else '_' for c in sanitized)
+    
     # Remove leading/trailing dots and spaces (Windows doesn't allow these)
     sanitized = sanitized.strip('. ')
+    
+    # Remove multiple consecutive underscores/spaces
+    sanitized = re.sub(r'[_\s]+', '_', sanitized)
+    sanitized = sanitized.strip('_')
     
     # Limit length to avoid Windows path issues
     # Windows has 260 char path limit, so keep folder names shorter
     if len(sanitized) > max_length:
         sanitized = sanitized[:max_length]
         # Strip again after truncation in case truncation left trailing spaces
-        sanitized = sanitized.strip('. ')
+        sanitized = sanitized.strip('. _')
     
     # If empty after sanitization, use default
     if not sanitized:
@@ -642,7 +687,7 @@ def download_dataset(page, output_path, timeout=60000):
         download = download_info.value
         
         # Get the original suggested filename to detect file extension
-        suggested_filename = download.suggested_filename()
+        suggested_filename = download.suggested_filename
         file_extension = None
         if suggested_filename:
             # Extract extension from suggested filename
@@ -682,7 +727,22 @@ def get_source_data(row, url_source_col, title_source_col, office_source_col, ag
         Tuple of (url: str, title: str, office: str, agency: str)
     """
     url = str(row[url_source_col]).strip() if pd.notna(row[url_source_col]) else ""
-    title = str(row[title_source_col]).strip() if title_source_col and pd.notna(row.get(title_source_col)) else ""
+    
+    # Extract title with proper encoding handling
+    if title_source_col and pd.notna(row.get(title_source_col)):
+        title_value = row[title_source_col]
+        # Ensure proper Unicode handling - pandas should preserve it, but normalize to be safe
+        if isinstance(title_value, str):
+            title = title_value.strip()
+        else:
+            # Convert to string, handling any encoding issues
+            try:
+                title = str(title_value).strip()
+            except Exception:
+                title = ""
+    else:
+        title = ""
+    
     office = str(row[office_source_col]).strip() if office_source_col and pd.notna(row.get(office_source_col)) else ""
     agency = str(row[agency_source_col]).strip() if agency_source_col and pd.notna(row.get(agency_source_col)) else ""
     
