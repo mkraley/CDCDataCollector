@@ -368,140 +368,16 @@ def wait_for_obscuring_elements(current_driver_obj, verbose):
             WebDriverWait(current_driver_obj, 360).until(EC.invisibility_of_element_located(overlay))
             sleep(0.5)
 
-def fix_encoding_issues(text):
-    """
-    Fix common encoding issues in text, particularly from UTF-8/Windows-1252 mismatches.
-    
-    Common issues:
-    - "â¢" -> "•" (bullet point)
-    - "â€"" -> "—" (em dash)
-    - "â€"" -> "–" (en dash)
-    - "â€™" -> "'" (right single quotation mark)
-    - "â€œ" -> left double quotation mark
-    - "â€" -> right double quotation mark
-    
-    Args:
-        text: String that may contain encoding issues
-    
-    Returns:
-        String with encoding issues fixed
-    """
-    if not text or not isinstance(text, str):
-        return text
-    
-    # Common UTF-8 -> Windows-1252 mis-encodings
-    # These are patterns where UTF-8 multi-byte sequences were interpreted as Windows-1252
-    # The pattern "â¢" is actually the UTF-8 bytes for bullet (•) mis-decoded as Windows-1252
-    replacements = {
-        'â¢': '•',      # Bullet point (U+2022) - UTF-8 bytes E2 80 A2 decoded as Windows-1252
-        'â€"': '—',     # Em dash (U+2014) - UTF-8 bytes E2 80 94 decoded as Windows-1252
-        'â€"': '–',     # En dash (U+2013) - UTF-8 bytes E2 80 93 decoded as Windows-1252
-        'â€™': "'",     # Right single quotation mark (U+2019) - UTF-8 bytes E2 80 99
-        'â€œ': '"',     # Left double quotation mark (U+201C) - UTF-8 bytes E2 80 9C
-        'â€"': '"',     # Right double quotation mark (U+201D) - UTF-8 bytes E2 80 9D
-        'â€¦': '...',   # Ellipsis (U+2026) - UTF-8 bytes E2 80 A6
-    }
-    
-    # Apply replacements
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    
-    # Handle double-encoding issues (UTF-8 bytes interpreted as Windows-1252, then re-encoded as UTF-8)
-    # Use latin-1 encoding to preserve all byte values (maps bytes 0x00-0xFF directly to Unicode)
-    # This allows us to detect the byte pattern even if it's already been decoded incorrectly
-    try:
-        text_bytes_latin1 = text.encode('latin-1', errors='ignore')
-        replacements_found = False
-        
-        # Pattern: c3 a2 c2 80 c2 99 = double-encoded right single quotation mark (')
-        if b'\xc3\xa2\xc2\x80\xc2\x99' in text_bytes_latin1:
-            text_bytes_latin1 = text_bytes_latin1.replace(b'\xc3\xa2\xc2\x80\xc2\x99', b"'")
-            replacements_found = True
-        
-        # Pattern: c2 96 = Windows-1252 en dash (0x96) incorrectly encoded as UTF-8
-        # In Windows-1252, 0x96 is an en dash (–), which in UTF-8 is E2 80 93
-        if b'\xc2\x96' in text_bytes_latin1:
-            text_bytes_latin1 = text_bytes_latin1.replace(b'\xc2\x96', b'\xe2\x80\x93')  # UTF-8 for en dash (–)
-            replacements_found = True
-        
-        # Pattern: c3 a2 c2 89 c2 a5 = double-encoded greater-than-or-equal sign (≥)
-        # Original UTF-8: E2 89 A5 = ≥ (U+2265)
-        # When E2 89 A5 was misinterpreted:
-        #   E2 → â (Windows-1252) → C3 A2 (UTF-8)
-        #   89 → ? → C2 89 (UTF-8)
-        #   A5 → ¥ (Windows-1252) → C2 A5 (UTF-8)
-        if b'\xc3\xa2\xc2\x89\xc2\xa5' in text_bytes_latin1:
-            # Replace with the correct UTF-8 bytes for ≥
-            text_bytes_latin1 = text_bytes_latin1.replace(b'\xc3\xa2\xc2\x89\xc2\xa5', b'\xe2\x89\xa5')
-            replacements_found = True
-        
-        if replacements_found:
-            # Decode back using latin-1, then properly decode the UTF-8 bytes we may have introduced
-            text = text_bytes_latin1.decode('latin-1', errors='ignore')
-            # If we replaced c2 96 with UTF-8 en dash bytes, we need to ensure proper decoding
-            try:
-                # Re-encode as latin-1 to get bytes, then decode as UTF-8
-                final_bytes = text.encode('latin-1', errors='ignore')
-                # Check if we have valid UTF-8 sequences and decode them
-                text = final_bytes.decode('utf-8', errors='ignore')
-            except Exception:
-                pass
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
-    except Exception:
-        pass
-    
-    # Also try to fix by re-encoding: if text contains Windows-1252 artifacts,
-    # try to decode as Windows-1252 and re-encode as UTF-8
-    # This reverses the mis-encoding process
-    try:
-        # Check if text contains common Windows-1252 artifacts that suggest mis-encoding
-        if 'â' in text:
-            try:
-                # The text was likely UTF-8 that was decoded as Windows-1252
-                # To fix: encode as Windows-1252 (which gives us the original UTF-8 bytes)
-                # then decode as UTF-8 (which gives us the correct characters)
-                fixed = text.encode('windows-1252', errors='ignore').decode('utf-8', errors='ignore')
-                # Only use if it results in valid characters and doesn't contain artifacts
-                if fixed and len(fixed) > 0 and not any(c in fixed for c in ['â', '€']):
-                    text = fixed
-            except (UnicodeEncodeError, UnicodeDecodeError):
-                pass
-    except Exception:
-        pass
-    
-    return text
-
-
 def read_csv_line(csv_file, line_to_process):
     # gets the input from the specified line of the csv file, to put it in the datalumos forms.
-    # Try multiple encodings to handle files that may have been written with different encodings
-    encodings = ['utf-8-sig', 'utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
-    last_error = None
-    
-    for encoding in encodings:
-        try:
-            with open(csv_file, "r", encoding=encoding, newline='') as datafile:
-                datareader = csv.DictReader(datafile)
-                for i, singlerow in enumerate(datareader):
-                    if i == (line_to_process - 1):  # -1 because i starts counting at 0
-                        return singlerow  # is already a dictionary
-                # If we get here, the line wasn't found but encoding worked
-                raise ValueError(f"Line {line_to_process} not found in CSV file (file has fewer rows)")
-        except UnicodeDecodeError as e:
-            # Try next encoding
-            last_error = e
-            continue
-        except ValueError:
-            # Re-raise ValueError (line not found)
-            raise
-        except Exception as e:
-            # Other error, try next encoding
-            last_error = e
-            continue
-    
-    # If all encodings failed, raise an error
-    raise ValueError(f"Could not read CSV file {csv_file} with any of the attempted encodings: {encodings}. Last error: {last_error}")
+    # CSV files are expected to be UTF-8-sig encoded
+    with open(csv_file, "r", encoding='utf-8-sig', newline='') as datafile:
+        datareader = csv.DictReader(datafile)
+        for i, singlerow in enumerate(datareader):
+            if i == (line_to_process - 1):  # -1 because i starts counting at 0
+                return singlerow  # is already a dictionary
+        # If we get here, the line wasn't found
+        raise ValueError(f"Line {line_to_process} not found in CSV file (file has fewer rows)")
 
 def get_paths_uploadfiles(folderpath, projectfolder):
     # Builds a list with all the single file paths to be uploaded. Takes as argument the path to the parent folder,
@@ -561,6 +437,35 @@ def drag_and_drop_file(drop_target, path):
     file_input.send_keys(path)
 
 
+def check_csv_writability(csv_file_path):
+    """
+    Check if the CSV file is writable by attempting to read and write it.
+    
+    Args:
+        csv_file_path: Path to the CSV file
+    
+    Returns:
+        Tuple of (success: bool, error_message: str or None)
+    """
+    try:
+        # CSV files are expected to be UTF-8-sig encoded
+        df = pd.read_csv(csv_file_path, encoding='utf-8-sig')
+        
+        # Ensure datalumos_id column exists
+        if 'datalumos_id' not in df.columns:
+            df['datalumos_id'] = ''
+        
+        # Try to write the file back (this checks writability)
+        df.to_csv(csv_file_path, index=False, encoding='utf-8-sig')
+        return True, None
+    except (PermissionError, IOError, OSError) as e:
+        error_msg = f"CSV file is not writable: {csv_file_path}\n   Error: {str(e)}\n   Please close the file if it's open in Excel or another program."
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Error checking CSV file writability: {str(e)}"
+        return False, error_msg
+
+
 def update_csv_workspace_id(csv_file_path, row_number, workspace_id):
     """
     Update the CSV file with the workspace ID in the datalumos_id column.
@@ -575,26 +480,8 @@ def update_csv_workspace_id(csv_file_path, row_number, workspace_id):
     
     while retry_count < max_retries:
         try:
-            # Try multiple encodings to handle files that may have been written with different encodings
-            encodings = ['utf-8-sig', 'utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
-            df = None
-            detected_encoding = None
-            
-            for encoding in encodings:
-                try:
-                    # Read the CSV file with the current encoding
-                    df = pd.read_csv(csv_file_path, encoding=encoding)
-                    detected_encoding = encoding
-                    break  # Successfully read, exit the loop
-                except UnicodeDecodeError:
-                    # Try next encoding
-                    continue
-                except Exception:
-                    # Other error, try next encoding
-                    continue
-            
-            if df is None:
-                raise ValueError(f"Could not read CSV file {csv_file_path} with any of the attempted encodings: {encodings}")
+            # CSV files are expected to be UTF-8-sig encoded
+            df = pd.read_csv(csv_file_path, encoding='utf-8-sig')
             
             # Ensure datalumos_id column exists and is string type
             if 'datalumos_id' not in df.columns:
@@ -606,10 +493,8 @@ def update_csv_workspace_id(csv_file_path, row_number, workspace_id):
             # Update the specific row (row_number is 1-indexed, excluding header, so it maps to index row_number - 1)
             df.loc[row_number - 1, 'datalumos_id'] = str(workspace_id)
             
-            # Write back to CSV using the same encoding we read it with, or UTF-8-sig as default
-            # Prefer UTF-8-sig for new files, but preserve original encoding if it was cp1252
-            write_encoding = 'utf-8-sig' if detected_encoding in ['utf-8-sig', 'utf-8'] else detected_encoding or 'utf-8-sig'
-            df.to_csv(csv_file_path, index=False, encoding=write_encoding)
+            # Write back to CSV using UTF-8-sig
+            df.to_csv(csv_file_path, index=False, encoding='utf-8-sig')
             return  # Success, exit the function
         except (PermissionError, IOError, OSError) as e:
             # File is likely open in another program (Excel, etc.)
@@ -718,9 +603,8 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     # <input type="text" class="form-control" name="title" id="title" value="" data-reactid=".2.0.0.1.2.0.$0.$0.$0.$displayPropKey2.0.2.0">
     project_title_form = WebDriverWait(mydriver, 10).until(EC.presence_of_element_located((By.ID, "title")))
     # title with pre-title (if existent):
-    # Fix encoding issues in title fields
-    title = fix_encoding_issues(datadict["4_title"]) if datadict.get("4_title") else ""
-    pre_title = fix_encoding_issues(datadict["4_pre_title"]) if datadict.get("4_pre_title") else ""
+    title = datadict.get("4_title", "") or ""
+    pre_title = datadict.get("4_pre_title", "") or ""
     pojecttitle = title if len(pre_title) == 0 else pre_title + " " + title
     project_title_form.send_keys(pojecttitle)
     # .save-project
@@ -851,10 +735,7 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
 
     # --- Summary
 
-    summarytext = datadict["6_summary_description"]
-    # Fix encoding issues in summary text
-    if summarytext:
-        summarytext = fix_encoding_issues(summarytext)
+    summarytext = datadict.get("6_summary_description", "") or ""
     
     if len(summarytext) != 0 and summarytext != " ":
         # summary edit: <span data-reactid=".0.3.1.1.0.1.2.0.2.1:$0.$0.$0.0.$displayPropKey2.$dcterms_description_0.1.0.0.0.2.1"> edit</span>
@@ -920,11 +801,10 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     #   css-sel: .select2-search__field
     # scroll bar: <li class="select2-results__option select2-results__option--highlighted" role="treeitem" aria-selected="false">HIFLD Open</li>
     #    css-sel: .select2-results__option
-    # Fix encoding issues in keyword fields
     keywordcells = [
-        fix_encoding_issues(datadict.get("8_subject_terms1", "") or ""),
-        fix_encoding_issues(datadict.get("8_subject_terms2", "") or ""),
-        fix_encoding_issues(datadict.get("8_keywords", "") or "")
+        datadict.get("8_subject_terms1", "") or "",
+        datadict.get("8_subject_terms2", "") or "",
+        datadict.get("8_keywords", "") or ""
     ]
     keywords_to_insert = []
     for single_keywordcell in keywordcells:
@@ -1411,9 +1291,9 @@ def publish_workspace(mydriver, current_row=None, verbose=False):
     for attempt in range(2):  # Try twice: original attempt + one retry
         if attempt > 0:
             row_info = f"Row {current_row}: " if current_row else ""
-            verbose_print(f"{row_info}Publish workflow failed, waiting 5 seconds before retry...", verbose)
+            print(f"{row_info}Publish workflow failed, waiting 5 seconds before retry...", verbose)
             sleep(5)
-            verbose_print(f"{row_info}Retrying publish workflow...", verbose)
+            print(f"{row_info}Retrying publish workflow...", verbose)
         
         try:
             # Step 1: Click "Publish Project" button
@@ -1608,239 +1488,286 @@ def nominate_url_to_gwda(mydriver, source_url, your_name, institution, email, ve
         return False, error_msg
 
 
+def process_single_row(mydriver, args, current_row, batch_num, total_rows):
+    """
+    Process a single row from the CSV file.
+    
+    Args:
+        mydriver: WebDriver instance
+        args: Parsed command-line arguments
+        current_row: Row number to process (1-indexed)
+        batch_num: Current row number in overall sequence (1-indexed)
+        total_rows: Total number of rows to process
+    
+    Returns:
+        None (errors and warnings are handled internally)
+    """
+    # Track errors and warnings for this row
+    row_errors = []
+    row_warnings = []
+    workspace_id = None
+    source_url = None
+
+    try:
+        datadict = read_csv_line(args.csv_file_path, current_row)
+        verbose_print(f"\n{datadict}", args.verbose)
+        verbose_print("\n----------------------------", args.verbose)
+        
+        # Get source URL for summary
+        source_url = datadict.get("7_original_distribution_url", "")
+        
+        # Handle only-publish mode: navigate directly to workspace
+        if args.publish_mode == 'only-publish':
+            # Read workspace ID from CSV (datalumos_id column)
+            workspace_id_str = datadict.get('datalumos_id', '').strip()
+            if not workspace_id_str:
+                error_msg = f"Row {current_row}: No workspace ID found in datalumos_id column. Cannot publish."
+                row_errors.append(error_msg)
+                if not args.verbose:
+                    print(f"[{batch_num}/{total_rows}] Workspace ID: N/A | Source URL: {source_url if source_url else 'N/A'}")
+                    print(f"  ✗ ERROR: {error_msg}")
+                else:
+                    verbose_print(f"✗ {error_msg}", args.verbose)
+                return
+            
+            # Convert workspace ID to integer (handles cases like '123456.0' from CSV)
+            try:
+                workspace_id = int(float(workspace_id_str))
+            except (ValueError, TypeError):
+                error_msg = f"Row {current_row}: Invalid workspace ID format: '{workspace_id_str}'. Expected a number."
+                row_errors.append(error_msg)
+                if not args.verbose:
+                    print(f"[{batch_num}/{total_rows}] Workspace ID: N/A | Source URL: {source_url if source_url else 'N/A'}")
+                    print(f"  ✗ ERROR: {error_msg}")
+                else:
+                    verbose_print(f"✗ {error_msg}", args.verbose)
+                return
+            
+            # Navigate directly to workspace
+            workspace_url = f"https://www.datalumos.org/datalumos/workspace?goToPath=/datalumos/{workspace_id}&goToLevel=project"
+            verbose_print(f"Navigating to workspace: {workspace_url}", args.verbose)
+            mydriver.get(workspace_url)
+            wait_for_obscuring_elements(mydriver, args.verbose)
+            sleep(2)
+            verbose_print(f"Processing row {current_row} (only-publish mode), Workspace ID: {workspace_id}\n", args.verbose)
+        else:
+            # Normal mode: create project and fill forms
+            verbose_print(f"Processing row {current_row}, Title: {datadict['4_title']}\n", args.verbose)
+            workspace_id = fill_project_forms(mydriver, datadict, args, row_errors, row_warnings)
+
+        # --- Publish Project
+        
+        publish_success = False
+        if args.publish_mode != 'no-publish':
+            publish_success, publish_error = publish_workspace(mydriver, current_row, args.verbose)
+            if not publish_success:
+                row_warnings.append(publish_error)
+        else:
+            verbose_print("Skipping publish workflow (no-publish mode)", args.verbose)
+
+        # Update Google Sheet with publishing results (if configured)
+        if args.google_sheet_id and args.google_credentials and publish_success and workspace_id:
+            try:
+                gsheet_success, gsheet_error = update_google_sheet(
+                    args.google_sheet_id,
+                    args.google_credentials,
+                    args.google_sheet_name,
+                    source_url,
+                    workspace_id,
+                    datadict,
+                    username=args.google_username,
+                    verbose=args.verbose
+                )
+                if not gsheet_success:
+                    error_msg = f"Google Sheet update failed: {gsheet_error}"
+                    row_errors.append(error_msg)
+                    verbose_print(f"⚠ {error_msg}", args.verbose)
+            except ValueError:
+                # Missing required columns - stop execution
+                raise
+            except Exception as e:
+                if args.verbose:
+                    error_msg = f"Error updating Google Sheet: {str(e)}"
+                    verbose_print(f"⚠ {error_msg}", args.verbose)
+                    verbose_print(traceback.format_exc(), args.verbose)
+                else:
+                    error_msg = f"Error updating Google Sheet: {format_exception_for_logging(e)}"
+                row_errors.append(error_msg)
+
+        # Update CSV with workspace ID
+        if workspace_id:
+            try:
+                update_csv_workspace_id(args.csv_file_path, current_row, workspace_id)
+                verbose_print(f"✓ Updated CSV row {current_row} with workspace ID: {workspace_id}", args.verbose)
+            except Exception as e:
+                if args.verbose:
+                    error_msg = f"Failed to update CSV with workspace ID: {str(e)}"
+                    verbose_print(f"⚠ {error_msg}", args.verbose)
+                else:
+                    error_msg = f"Failed to update CSV with workspace ID: {format_exception_for_logging(e)}"
+                row_errors.append(error_msg)
+        
+        # Nominate URL to GWDA (U.S. Government Web & Data Archive)
+        if source_url:
+            try:
+                # Use args.username as default for GWDA email if not provided
+                gwda_email = args.gwda_email if args.gwda_email else args.username
+                if not gwda_email:
+                    row_warnings.append("GWDA nomination skipped: No email provided (neither --GWDA-email nor --username)")
+                    verbose_print("⚠ GWDA nomination skipped: No email provided", args.verbose)
+                else:
+                    gwda_success, gwda_error = nominate_url_to_gwda(
+                        mydriver, 
+                        source_url, 
+                        args.gwda_your_name,
+                        args.gwda_institution,
+                        gwda_email,
+                        args.verbose
+                    )
+                    if not gwda_success:
+                        row_warnings.append(f"GWDA nomination failed: {gwda_error}")
+                        verbose_print(f"⚠ GWDA nomination failed: {gwda_error}", args.verbose)
+            except Exception as e:
+                if args.verbose:
+                    error_msg = f"Error nominating URL to GWDA: {str(e)}"
+                    verbose_print(f"⚠ {error_msg}", args.verbose)
+                    verbose_print(traceback.format_exc(), args.verbose)
+                else:
+                    error_msg = f"Error nominating URL to GWDA: {format_exception_for_logging(e)}"
+                row_warnings.append(error_msg)
+        
+        # Print summary line (non-verbose mode) or detailed output (verbose mode)
+        if not args.verbose:
+            # Summary format: [batch_num/total_rows] Workspace ID: {workspace_id} | Source URL: {source_url}
+            workspace_display = workspace_id if workspace_id else "N/A"
+            source_url_display = source_url if source_url else "N/A"
+            print(f"[{batch_num}/{total_rows}] Workspace ID: {workspace_display} | Source URL: {source_url_display}")
+            
+            # Print errors/warnings below the summary line if any
+            if row_errors:
+                for error in row_errors:
+                    print(f"  ✗ ERROR: {error}")
+            if row_warnings:
+                for warning in row_warnings:
+                    print(f"  ⚠ WARNING: {warning}")
+        else:
+            # In verbose mode, print detailed completion message
+            if workspace_id:
+                verbose_print(f"✓ Completed processing row {current_row}. Workspace ID: {workspace_id}", args.verbose)
+            else:
+                verbose_print(f"⚠ Completed processing row {current_row}, but workspace ID was not extracted.", args.verbose)
+    
+    except Exception as e:
+        if args.verbose:
+            error_msg = f"Error processing row {current_row}: {str(e)}"
+            verbose_print(f"\n✗ {error_msg}", args.verbose)
+            verbose_print(traceback.format_exc(), args.verbose)
+        else:
+            error_msg = f"Error processing row {current_row}: {format_exception_for_logging(e)}"
+        row_errors.append(error_msg)
+        if not args.verbose:
+            workspace_display = workspace_id if workspace_id else "N/A"
+            source_url_display = source_url if source_url else "N/A"
+            print(f"[{batch_num}/{total_rows}] Workspace ID: {workspace_display} | Source URL: {source_url_display}")
+            print(f"  ✗ ERROR: {error_msg}")
+        
+        # Try to update CSV even if there was an error (if we got a workspace ID)
+        if workspace_id:
+            try:
+                update_csv_workspace_id(args.csv_file_path, current_row, workspace_id)
+            except:
+                pass  # Already logged the error above
+
 
 def main():
     """Main execution function."""
     # Parse command line arguments
     args = parse_arguments()
     
-    # Initialize browser
-    mydriver = initialize_browser(args.browser)
+    # Check CSV writability before starting
+    print("\n" + "=" * 80)
+    print("Checking CSV File Writability")
+    print("=" * 80)
+    csv_writable, csv_error = check_csv_writability(args.csv_file_path)
+    if not csv_writable:
+        print(f"✗ {csv_error}")
+        print("\nPlease fix the CSV file issue before proceeding.")
+        return
+    else:
+        print(f"✓ CSV file is writable: {args.csv_file_path}\n")
     
-    try:
-        # Automated sign-in
-        print("\n" + "=" * 80)
-        print("DataLumos Automated Sign-In")
-        print("=" * 80)
-        signin_success, signin_message = sign_in(mydriver, args.username, args.password)
-        if not signin_success:
-            print(f"✗ {signin_message}")
-            print("Please check the browser and complete login manually if needed.")
-            input("Press Enter to continue after manual login...")
-        else:
-            print(f"✓ {signin_message}\n")
-
-        print("If you upload from USB device: MAKE SURE THE USB IS PLUGGED IN!\n")
-
-        # Determine which rows to process
-        if args.rows:
-            # Use specific rows from --rows parameter
-            rows_to_process = args.rows
-            total_rows = len(rows_to_process)
-        else:
-            # Use range from --start-row to --end-row
-            rows_to_process = list(range(args.start_row, args.end_row + 1))
-            total_rows = args.end_row - args.start_row + 1
+    # Determine which rows to process
+    if args.rows:
+        # Use specific rows from --rows parameter
+        rows_to_process = args.rows
+        total_rows = len(rows_to_process)
+    else:
+        # Use range from --start-row to --end-row
+        rows_to_process = list(range(args.start_row, args.end_row + 1))
+        total_rows = args.end_row - args.start_row + 1
+    
+    # Split rows into batches
+    batch_size = 5
+    batches = [rows_to_process[i:i + batch_size] for i in range(0, len(rows_to_process), batch_size)]
+    total_batches = len(batches)
+    
+    print("If you upload from USB device: MAKE SURE THE USB IS PLUGGED IN!\n")
+    print(f"Processing {total_rows} rows in {total_batches} batch(es) of up to {batch_size} rows each.\n")
+    
+    # Process each batch
+    for batch_index, batch_rows in enumerate(batches, start=1):
+        print(f"\n{'=' * 80}")
+        print(f"Starting Batch {batch_index}/{total_batches} (rows {batch_rows[0]}-{batch_rows[-1]})")
+        print(f"{'=' * 80}\n")
         
-        for batch_num, current_row in enumerate(rows_to_process, start=1):
-            # Track errors and warnings for this row
-            row_errors = []
-            row_warnings = []
-            workspace_id = None
-            source_url = None
-
-            try:
-                datadict = read_csv_line(args.csv_file_path, current_row)
-                verbose_print(f"\n{datadict}", args.verbose)
-                verbose_print("\n----------------------------", args.verbose)
-                
-                # Get source URL for summary
-                source_url = datadict.get("7_original_distribution_url", "")
-                
-                # Handle only-publish mode: navigate directly to workspace
-                if args.publish_mode == 'only-publish':
-                    # Read workspace ID from CSV (datalumos_id column)
-                    workspace_id_str = datadict.get('datalumos_id', '').strip()
-                    if not workspace_id_str:
-                        error_msg = f"Row {current_row}: No workspace ID found in datalumos_id column. Cannot publish."
-                        row_errors.append(error_msg)
-                        if not args.verbose:
-                            print(f"[{batch_num}/{total_rows}] Workspace ID: N/A | Source URL: {source_url if source_url else 'N/A'}")
-                            print(f"  ✗ ERROR: {error_msg}")
-                        else:
-                            verbose_print(f"✗ {error_msg}", args.verbose)
-                        continue
-                    
-                    # Convert workspace ID to integer (handles cases like '123456.0' from CSV)
-                    try:
-                        workspace_id = int(float(workspace_id_str))
-                    except (ValueError, TypeError):
-                        error_msg = f"Row {current_row}: Invalid workspace ID format: '{workspace_id_str}'. Expected a number."
-                        row_errors.append(error_msg)
-                        if not args.verbose:
-                            print(f"[{batch_num}/{total_rows}] Workspace ID: N/A | Source URL: {source_url if source_url else 'N/A'}")
-                            print(f"  ✗ ERROR: {error_msg}")
-                        else:
-                            verbose_print(f"✗ {error_msg}", args.verbose)
-                        continue
-                    
-                    # Navigate directly to workspace
-                    workspace_url = f"https://www.datalumos.org/datalumos/workspace?goToPath=/datalumos/{workspace_id}&goToLevel=project"
-                    verbose_print(f"Navigating to workspace: {workspace_url}", args.verbose)
-                    mydriver.get(workspace_url)
-                    wait_for_obscuring_elements(mydriver, args.verbose)
-                    sleep(2)
-                    verbose_print(f"Processing row {current_row} (only-publish mode), Workspace ID: {workspace_id}\n", args.verbose)
-                else:
-                    # Normal mode: create project and fill forms
-                    verbose_print(f"Processing row {current_row}, Title: {datadict['4_title']}\n", args.verbose)
-                    workspace_id = fill_project_forms(mydriver, datadict, args, row_errors, row_warnings)
-
-                # --- Publish Project
-                
-                publish_success = False
-                if args.publish_mode != 'no-publish':
-                    publish_success, publish_error = publish_workspace(mydriver, current_row, args.verbose)
-                    if not publish_success:
-                        row_warnings.append(publish_error)
-                else:
-                    verbose_print("Skipping publish workflow (no-publish mode)", args.verbose)
-
-                # Update Google Sheet with publishing results (if configured)
-                if args.google_sheet_id and args.google_credentials and publish_success and workspace_id:
-                    try:
-                        gsheet_success, gsheet_error = update_google_sheet(
-                            args.google_sheet_id,
-                            args.google_credentials,
-                            args.google_sheet_name,
-                            source_url,
-                            workspace_id,
-                            datadict,
-                            username=args.google_username,
-                            verbose=args.verbose
-                        )
-                        if not gsheet_success:
-                            error_msg = f"Google Sheet update failed: {gsheet_error}"
-                            row_errors.append(error_msg)
-                            verbose_print(f"⚠ {error_msg}", args.verbose)
-                    except ValueError:
-                        # Missing required columns - stop execution
-                        raise
-                    except Exception as e:
-                        if args.verbose:
-                            error_msg = f"Error updating Google Sheet: {str(e)}"
-                            verbose_print(f"⚠ {error_msg}", args.verbose)
-                            verbose_print(traceback.format_exc(), args.verbose)
-                        else:
-                            error_msg = f"Error updating Google Sheet: {format_exception_for_logging(e)}"
-                        row_errors.append(error_msg)
-
-                # Update CSV with workspace ID
-                if workspace_id:
-                    try:
-                        update_csv_workspace_id(args.csv_file_path, current_row, workspace_id)
-                        verbose_print(f"✓ Updated CSV row {current_row} with workspace ID: {workspace_id}", args.verbose)
-                    except Exception as e:
-                        if args.verbose:
-                            error_msg = f"Failed to update CSV with workspace ID: {str(e)}"
-                            verbose_print(f"⚠ {error_msg}", args.verbose)
-                        else:
-                            error_msg = f"Failed to update CSV with workspace ID: {format_exception_for_logging(e)}"
-                        row_errors.append(error_msg)
-                
-                # Nominate URL to GWDA (U.S. Government Web & Data Archive)
-                if source_url:
-                    try:
-                        # Use args.username as default for GWDA email if not provided
-                        gwda_email = args.gwda_email if args.gwda_email else args.username
-                        if not gwda_email:
-                            row_warnings.append("GWDA nomination skipped: No email provided (neither --GWDA-email nor --username)")
-                            verbose_print("⚠ GWDA nomination skipped: No email provided", args.verbose)
-                        else:
-                            gwda_success, gwda_error = nominate_url_to_gwda(
-                                mydriver, 
-                                source_url, 
-                                args.gwda_your_name,
-                                args.gwda_institution,
-                                gwda_email,
-                                args.verbose
-                            )
-                            if not gwda_success:
-                                row_warnings.append(f"GWDA nomination failed: {gwda_error}")
-                                verbose_print(f"⚠ GWDA nomination failed: {gwda_error}", args.verbose)
-                    except Exception as e:
-                        if args.verbose:
-                            error_msg = f"Error nominating URL to GWDA: {str(e)}"
-                            verbose_print(f"⚠ {error_msg}", args.verbose)
-                            verbose_print(traceback.format_exc(), args.verbose)
-                        else:
-                            error_msg = f"Error nominating URL to GWDA: {format_exception_for_logging(e)}"
-                        row_warnings.append(error_msg)
-                
-                # Print summary line (non-verbose mode) or detailed output (verbose mode)
-                if not args.verbose:
-                    # Summary format: [batch_num/total_rows] Workspace ID: {workspace_id} | Source URL: {source_url}
-                    workspace_display = workspace_id if workspace_id else "N/A"
-                    source_url_display = source_url if source_url else "N/A"
-                    print(f"[{batch_num}/{total_rows}] Workspace ID: {workspace_display} | Source URL: {source_url_display}")
-                    
-                    # Print errors/warnings below the summary line if any
-                    if row_errors:
-                        for error in row_errors:
-                            print(f"  ✗ ERROR: {error}")
-                    if row_warnings:
-                        for warning in row_warnings:
-                            print(f"  ⚠ WARNING: {warning}")
-                else:
-                    # In verbose mode, print detailed completion message
-                    if workspace_id:
-                        verbose_print(f"✓ Completed processing row {current_row}. Workspace ID: {workspace_id}", args.verbose)
-                    else:
-                        verbose_print(f"⚠ Completed processing row {current_row}, but workspace ID was not extracted.", args.verbose)
-                
-            except Exception as e:
-                if args.verbose:
-                    error_msg = f"Error processing row {current_row}: {str(e)}"
-                    verbose_print(f"\n✗ {error_msg}", args.verbose)
-                    verbose_print(traceback.format_exc(), args.verbose)
-                else:
-                    error_msg = f"Error processing row {current_row}: {format_exception_for_logging(e)}"
-                row_errors.append(error_msg)
-                if not args.verbose:
-                    workspace_display = workspace_id if workspace_id else "N/A"
-                    source_url_display = source_url if source_url else "N/A"
-                    print(f"[{batch_num}/{total_rows}] Workspace ID: {workspace_display} | Source URL: {source_url_display}")
-                    print(f"  ✗ ERROR: {error_msg}")
-                
-                # Try to update CSV even if there was an error (if we got a workspace ID)
-                if workspace_id:
-                    try:
-                        update_csv_workspace_id(args.csv_file_path, current_row, workspace_id)
-                    except:
-                        pass  # Already logged the error above
-
-            # Check if this was the last row to process
-            if batch_num == total_rows:
-                if args.verbose:
-                    print("\nContinue manually (check all the filled in details and publish the project(s)), and maybe check the script output for error messages.\n")
-                    print("In the Inventory spreadsheet: Add the needed data \n(for the HIFLD data: add the URL in the Download Location field, add 'Y' to the Data Added field, and change the status field to 'Done').\n")
-    
-    except Exception as e:
-        error_msg = format_exception_for_logging(e)
-        print(f"\n✗ Error during execution: {error_msg}")
-        # Only print full traceback in verbose mode
+        # Initialize browser for this batch
+        mydriver = None
         try:
+            mydriver = initialize_browser(args.browser)
+            
+            # Automated sign-in
+            print("\n" + "-" * 80)
+            print("DataLumos Automated Sign-In")
+            print("-" * 80)
+            signin_success, signin_message = sign_in(mydriver, args.username, args.password)
+            if not signin_success:
+                print(f"✗ {signin_message}")
+                print("Please check the browser and complete login manually if needed.")
+                input("Press Enter to continue after manual login...")
+            else:
+                print(f"✓ {signin_message}\n")
+            
+            # Process each row in this batch
+            for row_index_in_batch, current_row in enumerate(batch_rows, start=1):
+                batch_num = (batch_index - 1) * batch_size + row_index_in_batch
+                process_single_row(mydriver, args, current_row, batch_num, total_rows)
+
+            # Close browser after batch is complete
+            print(f"\nBatch {batch_index}/{total_batches} complete. Closing browser...")
+            if mydriver:
+                mydriver.quit()
+            print(f"✓ Browser closed after batch {batch_index}\n")
+        
+        except Exception as e:
+            error_msg = format_exception_for_logging(e)
+            print(f"\n✗ Error during batch {batch_index}: {error_msg}")
+            # Only print full traceback in verbose mode
             if args.verbose:
                 print(traceback.format_exc())
-        except NameError:
-            # args not defined yet, just print the formatted error
-            pass
-    finally:
-        # Keep browser open for manual review
-        print("\nBrowser will remain open. Close it manually when done.")
-        input("Press Enter to close the browser and exit...")
-        if 'mydriver' in locals():
-            mydriver.quit()
+            # Close browser even if there was an error
+            if mydriver:
+                try:
+                    mydriver.quit()
+                except:
+                    pass
+    
+    # Final message after all batches
+    print("\n" + "=" * 80)
+    print("All Batches Complete")
+    print("=" * 80)
+    if args.verbose:
+        print("\nContinue manually (check all the filled in details and publish the project(s)), and maybe check the script output for error messages.\n")
+        print("In the Inventory spreadsheet: Add the needed data \n(for the HIFLD data: add the URL in the Download Location field, add 'Y' to the Data Added field, and change the status field to 'Done').\n")
 
 
 if __name__ == "__main__":
