@@ -48,8 +48,8 @@ for folder_name in subfolders:
     folder_path = os.path.join(base_folder, folder_name)
     
     # Count files in the folder
-    files = [f for f in os.listdir(folder_path) 
-             if os.path.isfile(os.path.join(folder_path, f))]
+    files = [f for f in os.listdir(folder_path)]
+             #if os.path.isfile(os.path.join(folder_path, f))]
     file_count = len(files)
     
     # Check if it has exactly 2 files

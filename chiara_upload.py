@@ -51,6 +51,14 @@ except ImportError:
 url_datalumos = "https://www.datalumos.org/datalumos/workspace"
 
 
+class BatchRestartException(Exception):
+    """Exception raised when a batch needs to be restarted due to an error."""
+    def __init__(self, error_message, remaining_rows):
+        self.error_message = error_message
+        self.remaining_rows = remaining_rows
+        super().__init__(self.error_message)
+
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -662,6 +670,10 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         fileupload_field = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".col-md-offset-2 > span:nth-child(1)")))
 
         filepaths_to_upload = get_paths_uploadfiles(args.folder_path_uploadfiles, datadict["path"])
+        if len(filepaths_to_upload) != 2:
+            warning_msg = f"The number of files to upload is not 2: {len(filepaths_to_upload)} workspace id {workspace_id}"
+            verbose_print(f"⚠ {warning_msg}", args.verbose)
+            return
         verbose_print(f"\nFiles that will be uploaded: {[os.path.basename(f) for f in filepaths_to_upload]}\n", args.verbose)
         for singlefile in filepaths_to_upload:
             drag_and_drop_file(fileupload_field, singlefile)
@@ -808,13 +820,15 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     ]
     keywords_to_insert = []
     for single_keywordcell in keywordcells:
-        if len(single_keywordcell) > 2:
+        if len(single_keywordcell) > 0 and single_keywordcell != " ":
             more_keywords = single_keywordcell.replace("'", "").replace("[", "").replace("]", "").replace('"', '')  # remove quotes and brackets
             more_keywordslist = more_keywords.split(",")
             keywords_to_insert += more_keywordslist
     verbose_print(f"\nkeywords_to_insert: {keywords_to_insert}\n", args.verbose)
     for single_keyword in keywords_to_insert:
         keyword = single_keyword.strip(" '")
+        if len(keyword) <= 2:
+            continue
         try:
             wait_for_obscuring_elements(mydriver, args.verbose)
             keywords_form = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".select2-search__field")))
@@ -1375,6 +1389,18 @@ def publish_workspace(mydriver, current_row=None, verbose=False):
                 lambda d: '/datalumos/' in d.current_url and 'reviewPublish' not in d.current_url
             )
             verbose_print(f"Returned to workspace: {mydriver.current_url}", verbose)
+            
+            # Check for error message div
+            error_msg_divs = mydriver.find_elements(By.ID, 'errormsg')
+            if len(error_msg_divs) > 0:
+                error_msg_div = error_msg_divs[0]
+                if len(error_msg_div.text) > 0:
+                    error_text = error_msg_div.text
+                    row_info = f"Row {current_row}: " if current_row else ""
+                    error_message = f"{row_info}Error message detected: {error_text}"
+                    print(f"✗ {error_message}")
+                    raise BatchRestartException(error_message, None)
+            
             verbose_print("✓ Publishing workflow completed successfully", verbose)
             return True, None
             
@@ -1738,16 +1764,51 @@ def main():
                 print(f"✓ {signin_message}\n")
             
             # Process each row in this batch
+            batch_restart_needed = False
+            remaining_rows = []
             for row_index_in_batch, current_row in enumerate(batch_rows, start=1):
                 batch_num = (batch_index - 1) * batch_size + row_index_in_batch
-                process_single_row(mydriver, args, current_row, batch_num, total_rows)
+                try:
+                    process_single_row(mydriver, args, current_row, batch_num, total_rows)
+                except BatchRestartException as e:
+                    # Error message already logged, close browser and restart batch with remaining rows
+                    print(f"\nBatch restart required. Closing browser...")
+                    if mydriver:
+                        try:
+                            mydriver.quit()
+                        except:
+                            pass
+                    
+                    # Get remaining rows from this batch (row_index_in_batch is 1-based, so slice from that index)
+                    remaining_rows = batch_rows[row_index_in_batch:]
+                    batch_restart_needed = True
+                    # Exit the current batch loop
+                    break
 
-            # Close browser after batch is complete
-            print(f"\nBatch {batch_index}/{total_batches} complete. Closing browser...")
-            if mydriver:
-                mydriver.quit()
-            print(f"✓ Browser closed after batch {batch_index}\n")
+            # Close browser after batch is complete (if we didn't break due to BatchRestartException)
+            if not batch_restart_needed:
+                print(f"\nBatch {batch_index}/{total_batches} complete. Closing browser...")
+                if mydriver:
+                    mydriver.quit()
+                print(f"✓ Browser closed after batch {batch_index}\n")
+            else:
+                # Insert remaining rows as a new batch (using 0-based index)
+                if remaining_rows:
+                    batches.insert(batch_index, remaining_rows)
+                    total_batches = len(batches)
+                    print(f"Restarting batch with remaining rows: {remaining_rows}")
+                    # Continue outer loop to process the new batch
+                    continue
         
+        except BatchRestartException as e:
+            # This shouldn't happen here since we catch it in the inner loop, but just in case
+            error_msg = format_exception_for_logging(e)
+            print(f"\n✗ Batch restart exception: {error_msg}")
+            if mydriver:
+                try:
+                    mydriver.quit()
+                except:
+                    pass
         except Exception as e:
             error_msg = format_exception_for_logging(e)
             print(f"\n✗ Error during batch {batch_index}: {error_msg}")
