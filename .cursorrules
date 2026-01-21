@@ -1,0 +1,53 @@
+# Standing Instructions for CDC Data Collector Project
+
+## Code Style & Conventions
+- use python 13
+- target windows 11
+- use playwright for automating access to web pages
+- Use Windows path syntax for file paths (backslashes, drive letters)
+- Use type hints where appropriate
+- Add docstrings to functions and classes
+- Prefer descriptive variable names
+- CSV and other text-based files are UTF-8-sig encoded
+- keep methods short. Each method should do one thing only
+- Use python classes and inheritance where appropriate
+- segregate code in multiple files rather than creating very large source files. Typically only one class per file.
+
+## Testing
+- create unit tests as code is developed. Keep tests up to date.
+- store test code in parallel files, e.g. test_xxx.py
+
+## Logging
+- use standard log levels: debug, info, warning, error
+
+## Input parameters and configuration
+- use command line parameters for any configuration-type parameters with suitable defaults
+- allow use of a config file to hold parameters. config file is overridable by command line args
+
+## Project-Specific Guidelines
+
+
+## Error Handling
+- Provide clear error messages with context
+- Use try/except blocks for file operations and network requests
+- Log errors but don't crash the entire process unless necessary
+
+## Testing & Validation
+- Validate URLs before processing
+- Check file existence before operations
+- Handle missing columns in CSV/Excel files gracefully, but warn the user
+
+## Documentation
+- Update README.md when adding new features or changing behavior
+- Include examples in docstrings showing how to use functions
+
+## Dependencies
+- Keep requirements.txt up to date
+- Note: This code is written by Cursor/Claude (as noted in README)
+
+## Database
+- Use SQLite with WAL mode for shared database access
+
+## File Organization
+- Keep utility functions in separate modules (e.g., url_id_utils.py, shared_db.py)
+

@@ -17,6 +17,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
@@ -370,7 +371,7 @@ def sign_in(driver, username=None, password=None):
 def wait_for_obscuring_elements(current_driver_obj, verbose):
     overlays = current_driver_obj.find_elements(By.ID, "busy")  # caution: find_elements, not find_element
     if len(overlays) != 0:  # there is an overlay
-        verbose_print(f"... (Waiting for overlay to disappear. Overlay(s): {overlays})", verbose)
+        # verbose_print(f"... (Waiting for overlay to disappear. Overlay(s): {overlays})", verbose)
         for overlay in overlays:
             # Wait until the overlay becomes invisible:
             WebDriverWait(current_driver_obj, 360).until(EC.invisibility_of_element_located(overlay))
@@ -595,7 +596,33 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     
     # Navigate to workspace page
     verbose_print("Navigating to workspace...", args.verbose)
-    mydriver.get("https://www.datalumos.org/datalumos/workspace")
+    # Increase page load timeout for this operation (extend to 120 seconds)
+    if hasattr(mydriver, 'set_page_load_timeout'):
+        original_timeout = None
+        try:
+            original_timeout = mydriver.get_page_load_timeout()
+        except:
+            pass  # get_page_load_timeout() might not be available on all drivers
+        
+        try:
+            mydriver.set_page_load_timeout(120)  # 120 seconds timeout
+            mydriver.get("https://www.datalumos.org/datalumos/workspace")
+        finally:
+            # Restore original timeout if it existed
+            if original_timeout is not None:
+                try:
+                    mydriver.set_page_load_timeout(original_timeout)
+                except:
+                    pass
+            else:
+                # Reset to default (typically 30 seconds) if no original timeout was set
+                try:
+                    mydriver.set_page_load_timeout(30)
+                except:
+                    pass
+    else:
+        # Fallback if set_page_load_timeout is not available
+        mydriver.get("https://www.datalumos.org/datalumos/workspace")
     wait_for_verification(mydriver)
     
     new_project_btn = WebDriverWait(mydriver, 360).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn > span:nth-child(3)"))) # .btn > span:nth-child(3)
@@ -657,41 +684,6 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
     expand_btn.click()
     sleep(2)
 
-
-    # --- Upload files
-
-    if len(datadict["path"]) != 0 and datadict["path"] != " ":
-        # upload-button: <span data-reactid=".0.3.1.1.0.0.0.0.0.0.1.2.3">Upload Files</span>
-        #   a.btn-primary:nth-child(3) > span:nth-child(4)
-        wait_for_obscuring_elements(mydriver, args.verbose)
-        upload_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn-primary:nth-child(3) > span:nth-child(4)")))
-        upload_btn.click()
-        wait_for_obscuring_elements(mydriver, args.verbose)
-        fileupload_field = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".col-md-offset-2 > span:nth-child(1)")))
-
-        filepaths_to_upload = get_paths_uploadfiles(args.folder_path_uploadfiles, datadict["path"])
-        if len(filepaths_to_upload) != 2:
-            warning_msg = f"The number of files to upload is not 2: {len(filepaths_to_upload)} workspace id {workspace_id}"
-            verbose_print(f"⚠ {warning_msg}", args.verbose)
-            return
-        verbose_print(f"\nFiles that will be uploaded: {[os.path.basename(f) for f in filepaths_to_upload]}\n", args.verbose)
-        for singlefile in filepaths_to_upload:
-            drag_and_drop_file(fileupload_field, singlefile)
-
-        # when a file is uploaded and its progress bar is complete, a text appears: "File added to queue for upload."
-        #   To check that the files are completey uploaded, this text has to be there as often as the number of files:
-        filecount = len(filepaths_to_upload)
-        verbose_print(f"filecount: {filecount}", args.verbose)
-        # wait until the text has appeared as often as there are files:
-        #   (to wait longer for uploads to be completed, change the number in WebDriverWait(mydriver, ...) - it is the waiting time in seconds)
-        WebDriverWait(mydriver, 2000).until(lambda x: True if len(mydriver.find_elements(By.XPATH, "//span[text()='File added to queue for upload.']")) == filecount else False)
-        verbose_print("\nEverything should be uploaded completely now.\n", args.verbose)
-
-
-        # close-btn: .importFileModal > div:nth-child(3) > button:nth-child(1)
-        wait_for_obscuring_elements(mydriver, args.verbose)
-        close_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".importFileModal > div:nth-child(3) > button:nth-child(1)")))
-        close_btn.click()
 
 
     # --- Government agency
@@ -842,12 +834,11 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
             wait_for_obscuring_elements(mydriver, args.verbose)
             keyword_sugg.click()
         except Exception as e:
-            if args.verbose:
-                error_msg = f"Problem with keywords: {str(e)}"
-                verbose_print(f"\n⚠ There was a problem with the keywords! Please check if one or more are missing in the form and fill them in manually.\n Problem:", args.verbose)
-                verbose_print(traceback.format_exc(), args.verbose)
-            else:
-                error_msg = f"Problem with keywords: {format_exception_for_logging(e)}"
+            error_msg = f"Problem with keywords: {str(e)}"
+            verbose_print(f"\n⚠ There was a problem with the keywords! Please check if one or more are missing in the form and fill them in manually.\n Problem:", args.verbose)
+            print(f"\n⚠ {error_msg}")
+            print("\nFull traceback:")
+            print(traceback.format_exc())
             row_errors.append(error_msg)
 
 
@@ -952,6 +943,52 @@ def fill_project_forms(mydriver, datadict, args, row_errors, row_warnings):
         coll_notes_save_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".editable-submit")))
         coll_notes_save_btn.click()
 
+
+    # --- Upload files
+
+    if len(datadict["path"]) != 0 and datadict["path"] != " ":
+        # upload-button: <span data-reactid=".0.3.1.1.0.0.0.0.0.0.1.2.3">Upload Files</span>
+        #   a.btn-primary:nth-child(3) > span:nth-child(4)
+        wait_for_obscuring_elements(mydriver, args.verbose)
+        upload_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn-primary:nth-child(3) > span:nth-child(4)")))
+        upload_btn.click()
+        wait_for_obscuring_elements(mydriver, args.verbose)
+        fileupload_field = WebDriverWait(mydriver, 50).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".col-md-offset-2 > span:nth-child(1)")))
+
+        filepaths_to_upload = get_paths_uploadfiles(args.folder_path_uploadfiles, datadict["path"])
+        if len(filepaths_to_upload) != 2:
+            warning_msg = f"The number of files to upload is not 2: {len(filepaths_to_upload)} workspace id {workspace_id}"
+            verbose_print(f"⚠ {warning_msg}", args.verbose)
+            return
+        verbose_print(f"\nFiles that will be uploaded: {[os.path.basename(f) for f in filepaths_to_upload]}\n", args.verbose)
+        for singlefile in filepaths_to_upload:
+            try:
+                drag_and_drop_file(fileupload_field, singlefile)
+            except Exception as e:
+                error_msg = f"Error uploading file '{os.path.basename(singlefile)}': {str(e)}"
+                verbose_print(f"⚠ {error_msg}", args.verbose)
+                print(f"⚠ {error_msg}")
+                print(f"Full path: {singlefile}")
+                print("\nFull traceback:")
+                print(traceback.format_exc())
+                row_errors.append(error_msg)
+                raise  # Re-raise to stop processing
+
+        # when a file is uploaded and its progress bar is complete, a text appears: "File added to queue for upload."
+        #   To check that the files are completey uploaded, this text has to be there as often as the number of files:
+        filecount = len(filepaths_to_upload)
+        verbose_print(f"filecount: {filecount}", args.verbose)
+        # wait until the text has appeared as often as there are files:
+        #   (to wait longer for uploads to be completed, change the number in WebDriverWait(mydriver, ...) - it is the waiting time in seconds)
+        WebDriverWait(mydriver, 2000).until(lambda x: True if len(mydriver.find_elements(By.XPATH, "//span[text()='File added to queue for upload.']")) == filecount else False)
+        verbose_print("\nEverything should be uploaded completely now.\n", args.verbose)
+
+
+        # close-btn: .importFileModal > div:nth-child(3) > button:nth-child(1)
+        wait_for_obscuring_elements(mydriver, args.verbose)
+        close_btn = WebDriverWait(mydriver, 50).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".importFileModal > div:nth-child(3) > button:nth-child(1)")))
+        close_btn.click()
+        
     return workspace_id
 
 
@@ -1320,11 +1357,26 @@ def publish_workspace(mydriver, current_row=None, verbose=False):
             publish_project_btn.click()
             
             # Wait for navigation to review/publish page
-            WebDriverWait(mydriver, 30).until(
-                lambda d: 'reviewPublish' in d.current_url
-            )
-            verbose_print(f"Navigated to review/publish page: {mydriver.current_url}", verbose)
-            sleep(1)
+            try:
+                WebDriverWait(mydriver, 30).until(
+                    lambda d: 'reviewPublish' in d.current_url
+                )
+                verbose_print(f"Navigated to review/publish page: {mydriver.current_url}", verbose)
+                sleep(1)
+            except TimeoutException:
+                # If timeout waiting for reviewPublish, check for error message (same logic as line 1404)
+                verbose_print("Timeout waiting for reviewPublish page, checking for error message...", verbose)
+                error_msg_divs = mydriver.find_elements(By.ID, 'errormsg')
+                if len(error_msg_divs) > 0:
+                    error_msg_div = error_msg_divs[0]
+                    if len(error_msg_div.text) > 0:
+                        error_text = error_msg_div.text
+                        row_info = f"Row {current_row}: " if current_row else ""
+                        error_message = f"{row_info}Error message detected: {error_text}"
+                        print(f"✗ {error_message}")
+                        raise BatchRestartException(error_message, None)
+                # If no error message found, re-raise the timeout exception
+                raise
             
             # Step 2: Click "Proceed to Publish" button
             # <button type="submit" class="btn btn-primary btn-sm" ...>Proceed to Publish</button>
@@ -1408,8 +1460,9 @@ def publish_workspace(mydriver, current_row=None, verbose=False):
             row_info = f"Row {current_row}: " if current_row else ""
             error_msg = f"{row_info}Error during publishing workflow: {str(e)}"
             verbose_print(f"⚠ {error_msg}", verbose)
-            if verbose:
-                verbose_print(traceback.format_exc(), verbose)
+            print(f"⚠ {error_msg}")
+            print("\nFull traceback:")
+            print(traceback.format_exc())
             
             # If this was the first attempt, we'll retry once
             if attempt == 0:
@@ -1612,12 +1665,11 @@ def process_single_row(mydriver, args, current_row, batch_num, total_rows):
                 # Missing required columns - stop execution
                 raise
             except Exception as e:
-                if args.verbose:
-                    error_msg = f"Error updating Google Sheet: {str(e)}"
-                    verbose_print(f"⚠ {error_msg}", args.verbose)
-                    verbose_print(traceback.format_exc(), args.verbose)
-                else:
-                    error_msg = f"Error updating Google Sheet: {format_exception_for_logging(e)}"
+                error_msg = f"Error updating Google Sheet: {str(e)}"
+                verbose_print(f"⚠ {error_msg}", args.verbose)
+                print(f"⚠ {error_msg}")
+                print("\nFull traceback:")
+                print(traceback.format_exc())
                 row_errors.append(error_msg)
 
         # Update CSV with workspace ID
@@ -1626,11 +1678,11 @@ def process_single_row(mydriver, args, current_row, batch_num, total_rows):
                 update_csv_workspace_id(args.csv_file_path, current_row, workspace_id)
                 verbose_print(f"✓ Updated CSV row {current_row} with workspace ID: {workspace_id}", args.verbose)
             except Exception as e:
-                if args.verbose:
-                    error_msg = f"Failed to update CSV with workspace ID: {str(e)}"
-                    verbose_print(f"⚠ {error_msg}", args.verbose)
-                else:
-                    error_msg = f"Failed to update CSV with workspace ID: {format_exception_for_logging(e)}"
+                error_msg = f"Failed to update CSV with workspace ID: {str(e)}"
+                verbose_print(f"⚠ {error_msg}", args.verbose)
+                print(f"⚠ {error_msg}")
+                print("\nFull traceback:")
+                print(traceback.format_exc())
                 row_errors.append(error_msg)
         
         # Nominate URL to GWDA (U.S. Government Web & Data Archive)
@@ -1654,12 +1706,11 @@ def process_single_row(mydriver, args, current_row, batch_num, total_rows):
                         row_warnings.append(f"GWDA nomination failed: {gwda_error}")
                         verbose_print(f"⚠ GWDA nomination failed: {gwda_error}", args.verbose)
             except Exception as e:
-                if args.verbose:
-                    error_msg = f"Error nominating URL to GWDA: {str(e)}"
-                    verbose_print(f"⚠ {error_msg}", args.verbose)
-                    verbose_print(traceback.format_exc(), args.verbose)
-                else:
-                    error_msg = f"Error nominating URL to GWDA: {format_exception_for_logging(e)}"
+                error_msg = f"Error nominating URL to GWDA: {str(e)}"
+                verbose_print(f"⚠ {error_msg}", args.verbose)
+                print(f"⚠ {error_msg}")
+                print("\nFull traceback:")
+                print(traceback.format_exc())
                 row_warnings.append(error_msg)
         
         # Print summary line (non-verbose mode) or detailed output (verbose mode)
@@ -1684,12 +1735,13 @@ def process_single_row(mydriver, args, current_row, batch_num, total_rows):
                 verbose_print(f"⚠ Completed processing row {current_row}, but workspace ID was not extracted.", args.verbose)
     
     except Exception as e:
+        error_msg = f"Error processing row {current_row}: {str(e)}"
         if args.verbose:
-            error_msg = f"Error processing row {current_row}: {str(e)}"
             verbose_print(f"\n✗ {error_msg}", args.verbose)
-            verbose_print(traceback.format_exc(), args.verbose)
-        else:
-            error_msg = f"Error processing row {current_row}: {format_exception_for_logging(e)}"
+        # Always print full Python traceback for debugging
+        print(f"\n✗ {error_msg}")
+        print("\nFull traceback:")
+        print(traceback.format_exc())
         row_errors.append(error_msg)
         if not args.verbose:
             workspace_display = workspace_id if workspace_id else "N/A"
@@ -1802,19 +1854,21 @@ def main():
         
         except BatchRestartException as e:
             # This shouldn't happen here since we catch it in the inner loop, but just in case
-            error_msg = format_exception_for_logging(e)
+            error_msg = str(e)
             print(f"\n✗ Batch restart exception: {error_msg}")
+            print("\nFull traceback:")
+            print(traceback.format_exc())
             if mydriver:
                 try:
                     mydriver.quit()
                 except:
                     pass
         except Exception as e:
-            error_msg = format_exception_for_logging(e)
+            error_msg = str(e)
             print(f"\n✗ Error during batch {batch_index}: {error_msg}")
-            # Only print full traceback in verbose mode
-            if args.verbose:
-                print(traceback.format_exc())
+            # Always print full traceback for debugging
+            print("\nFull traceback:")
+            print(traceback.format_exc())
             # Close browser even if there was an error
             if mydriver:
                 try:
@@ -1832,7 +1886,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Catch any unhandled exceptions and show full traceback
+        error_msg = str(e)
+        print(f"\n✗ Unhandled exception: {error_msg}")
+        print("\nFull traceback:")
+        print(traceback.format_exc())
+        raise  # Re-raise so debugger still stops on the exception if needed
 
 
 
